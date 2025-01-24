@@ -1,0 +1,39 @@
+---
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: BACKEND-job-match
+    restart: always
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    networks:
+      - job-match-network
+
+  db:
+    image: postgres:alpine
+    container_name: DB-job-match
+    restart: always
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: job-match
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - job-match-network
+
+volumes:
+  postgres_data:
+
+networks:
+  job-match-network:
+    driver: bridge
