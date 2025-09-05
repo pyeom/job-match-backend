@@ -21,3 +21,8 @@ class UserCreate(BaseModel):
     email: EmailStr
     password: str
     full_name: Optional[str] = None
+
+
+class LogoutResponse(BaseModel):
+    message: str
+    detail: Optional[str] = None

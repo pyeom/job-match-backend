@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
@@ -15,12 +16,13 @@ router = APIRouter()
 async def create_swipe(
     swipe_data: SwipeCreate,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Create a new swipe (and application if RIGHT)"""
     
     # Validate job exists
-    job = db.query(Job).filter(Job.id == swipe_data.job_id, Job.is_active == True).first()
+    result = await db.execute(select(Job).where(Job.id == swipe_data.job_id, Job.is_active == True))
+    job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
@@ -29,16 +31,17 @@ async def create_swipe(
         raise HTTPException(status_code=400, detail="Direction must be LEFT or RIGHT")
     
     # Check if swipe already exists (update if so)
-    existing_swipe = db.query(Swipe).filter(
+    result = await db.execute(select(Swipe).where(
         Swipe.user_id == current_user.id,
         Swipe.job_id == swipe_data.job_id
-    ).first()
+    ))
+    existing_swipe = result.scalar_one_or_none()
     
     if existing_swipe:
         # Update existing swipe
         existing_swipe.direction = swipe_data.direction
-        db.commit()
-        db.refresh(existing_swipe)
+        await db.commit()
+        await db.refresh(existing_swipe)
         swipe = existing_swipe
     else:
         # Create new swipe
@@ -48,15 +51,16 @@ async def create_swipe(
             direction=swipe_data.direction
         )
         db.add(swipe)
-        db.commit()
-        db.refresh(swipe)
+        await db.commit()
+        await db.refresh(swipe)
     
     # If RIGHT swipe, create or update application
     if swipe_data.direction == "RIGHT":
-        existing_application = db.query(Application).filter(
+        result = await db.execute(select(Application).where(
             Application.user_id == current_user.id,
             Application.job_id == swipe_data.job_id
-        ).first()
+        ))
+        existing_application = result.scalar_one_or_none()
         
         if not existing_application:
             application = Application(
@@ -65,6 +69,6 @@ async def create_swipe(
                 status="SUBMITTED"
             )
             db.add(application)
-            db.commit()
+            await db.commit()
     
     return swipe
