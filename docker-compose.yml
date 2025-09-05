@@ -2,7 +2,7 @@
 
 services:
   db:
-    image: postgres:alpine
+    image: pgvector/pgvector:pg16
     container_name: db-jobmatch
     env_file:
       - .env
@@ -12,6 +12,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
     restart: unless-stopped
     ports:
       - "5432:5432"

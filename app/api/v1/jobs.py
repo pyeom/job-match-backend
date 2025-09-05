@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_, not_, exists
 from typing import List, Optional
 from app.core.database import get_db
 from app.api.deps import get_current_user
@@ -15,10 +16,11 @@ router = APIRouter()
 async def get_job(
     job_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Get a specific job by ID"""
-    job = db.query(Job).filter(Job.id == job_id, Job.is_active == True).first()
+    result = await db.execute(select(Job).where(Job.id == job_id, Job.is_active == True))
+    job = result.scalar_one_or_none()
     
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -31,7 +33,7 @@ async def discover_jobs(
     limit: int = Query(20, ge=1, le=50),
     cursor: Optional[str] = None,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: AsyncSession = Depends(get_db)
 ):
     """Get personalized job recommendations (discover feed)
     
@@ -43,10 +45,9 @@ async def discover_jobs(
     
     # For now, return active jobs that user hasn't swiped on
     # This is a placeholder - full ML implementation needed
-    from sqlalchemy import and_, not_, exists
     from app.models.swipe import Swipe
     
-    jobs_query = db.query(Job).filter(
+    stmt = select(Job).where(
         and_(
             Job.is_active == True,
             not_(exists().where(
@@ -58,7 +59,8 @@ async def discover_jobs(
         )
     ).order_by(Job.created_at.desc()).limit(limit)
     
-    jobs = jobs_query.all()
+    result = await db.execute(stmt)
+    jobs = result.scalars().all()
     
     # Add placeholder scores (to be replaced with ML scoring)
     job_results = []
