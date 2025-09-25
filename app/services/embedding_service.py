@@ -24,29 +24,55 @@ class EmbeddingService:
             logger.error(f"Failed to load embedding model: {e}")
             raise
     
-    def generate_job_embedding(self, title: str, company: str, description: Optional[str] = None, tags: Optional[List[str]] = None) -> List[float]:
-        """Generate embedding for a job posting
+    async def generate_job_embedding(self, job_text: str) -> List[float]:
+        """Generate embedding for a job posting from combined text
         
+        Args:
+            job_text: Combined text (title + company + tags + description)
+            
+        Returns:
+            List of float values representing the embedding
+        """
+        try:
+            embedding = self.model.encode(job_text, convert_to_tensor=False)
+            return embedding.tolist()
+        except Exception as e:
+            logger.error(f"Failed to generate job embedding: {e}")
+            raise
+    
+    def generate_job_embedding_from_parts(
+        self,
+        title: str,
+        company: str,
+        short_description: Optional[str] = None,
+        description: Optional[str] = None,
+        tags: Optional[List[str]] = None
+    ) -> List[float]:
+        """Generate embedding for a job posting
+
         Args:
             title: Job title
             company: Company name
-            description: Job description (optional)
+            short_description: Brief job description for cards (preferred for embedding)
+            description: Full job description (fallback)
             tags: List of skills/tags (optional)
-            
+
         Returns:
             List of float values representing the embedding
         """
         # Combine job information into a single text
         text_parts = [title, company]
-        
+
         if tags:
             text_parts.append(" ".join(tags))
-        
-        if description:
+
+        # Prioritize short_description for embedding, fallback to description
+        desc_to_use = short_description or description
+        if desc_to_use:
             # Truncate description to prevent very long texts
-            description = description[:500] if len(description) > 500 else description
-            text_parts.append(description)
-        
+            desc_to_use = desc_to_use[:500] if len(desc_to_use) > 500 else desc_to_use
+            text_parts.append(desc_to_use)
+
         combined_text = " | ".join(text_parts)
         
         try:

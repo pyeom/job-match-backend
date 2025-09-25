@@ -5,9 +5,19 @@ from sqlalchemy import pool
 
 from alembic import context
 
+import os
+
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+db_url = os.getenv("DATABASE_URL")
+if db_url:
+    # Convert async URL to sync for Alembic migrations
+    if "postgresql+asyncpg://" in db_url:
+        db_url = db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+    config.set_main_option("sqlalchemy.url", db_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -16,9 +26,14 @@ if config.config_file_name is not None:
 
 # add your model's MetaData object here
 # for 'autogenerate' support
-# from myapp import mymodel
-# target_metadata = mymodel.Base.metadata
-target_metadata = None
+import sys
+sys.path.append('.')
+
+# Import all models to ensure they are registered with SQLAlchemy
+from app.models import *
+from app.core.database import Base
+
+target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
@@ -38,7 +53,7 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url")
+    url = db_url or config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -65,11 +80,27 @@ def run_migrations_online() -> None:
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection, 
+            target_metadata=target_metadata,
+            # Better comparison options for more robust change detection
+            compare_type=True,
+            compare_server_default=True,
+            include_schemas=True,
+            # Render item to handle custom types like Vector
+            render_item=render_item,
         )
 
         with context.begin_transaction():
             context.run_migrations()
+
+
+def render_item(type_, obj, autogen_context):
+    """Render custom types properly in migrations."""
+    # Handle pgvector Vector type properly
+    if hasattr(obj, 'type') and hasattr(obj.type, '__class__'):
+        if 'vector' in str(obj.type.__class__).lower():
+            return f"pgvector.sqlalchemy.Vector({obj.type.dim})"
+    return False
 
 
 if context.is_offline_mode():
