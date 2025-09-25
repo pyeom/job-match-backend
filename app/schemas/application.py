@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 import uuid
 
@@ -10,8 +10,39 @@ class ApplicationCreate(BaseModel):
 
 
 class ApplicationUpdate(BaseModel):
-    status: Optional[str] = None  # SUBMITTED, REJECTED, ACCEPTED
+    status: Optional[str] = None  # SUBMITTED, WAITING_FOR_REVIEW, HR_MEETING, TECHNICAL_INTERVIEW, FINAL_INTERVIEW, HIRED, REJECTED
     notes: Optional[str] = None
+    cover_letter: Optional[str] = None
+
+
+class BulkApplicationUpdate(BaseModel):
+    application_ids: List[uuid.UUID]
+    status: str
+    notes: Optional[str] = None
+
+
+class UserBasicInfo(BaseModel):
+    """Basic user information for application listings"""
+    id: uuid.UUID
+    email: str
+    full_name: Optional[str] = None
+    skills: Optional[List[str]] = None
+    seniority: Optional[str] = None
+    location: Optional[str] = None  # Primary preferred location
+    
+    class Config:
+        from_attributes = True
+
+
+class JobBasicInfo(BaseModel):
+    """Basic job information for application listings"""
+    id: uuid.UUID
+    title: str
+    location: Optional[str] = None
+    seniority: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
 
 
 class Application(BaseModel):
@@ -26,3 +57,66 @@ class Application(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+class ApplicationWithDetails(Application):
+    """Application with user and job details for company dashboard and job seeker view"""
+    user: Optional[UserBasicInfo] = None
+    job: Optional["JobDetails"] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CompanyDetails(BaseModel):
+    """Company details for application responses"""
+    id: uuid.UUID
+    name: str
+    logo_url: Optional[str] = None
+    location: Optional[str] = None
+    size: Optional[str] = None
+    industry: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class JobDetails(BaseModel):
+    """Job details for application responses"""
+    id: uuid.UUID
+    title: str
+    location: Optional[str] = None
+    seniority: Optional[str] = None
+    short_description: Optional[str] = None
+    description: Optional[str] = None
+    tags: Optional[List[str]] = None
+    salary_min: Optional[int] = None
+    salary_max: Optional[int] = None
+    remote: Optional[bool] = None
+    created_at: datetime
+    company: Optional[CompanyDetails] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ApplicationStatusFilter(BaseModel):
+    """Filter for application status queries"""
+    statuses: Optional[List[str]] = None
+    created_after: Optional[datetime] = None
+    created_before: Optional[datetime] = None
+    seniority_levels: Optional[List[str]] = None
+    locations: Optional[List[str]] = None
+
+
+class ApplicationExport(BaseModel):
+    """Application data for export"""
+    application_id: uuid.UUID
+    user_email: str
+    user_name: Optional[str]
+    job_title: str
+    status: str
+    applied_date: datetime
+    last_updated: Optional[datetime]
+    cover_letter: Optional[str]
+    notes: Optional[str]

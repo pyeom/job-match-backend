@@ -13,8 +13,9 @@ class Application(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id"), nullable=False, index=True)
     
-    # Application status
-    status = Column(String(20), nullable=False, default="SUBMITTED", index=True)  # SUBMITTED, REJECTED, ACCEPTED
+    # Application status - following the full lifecycle from CLAUDE.md
+    status = Column(String(25), nullable=False, default="SUBMITTED", index=True)
+    # SUBMITTED, WAITING_FOR_REVIEW, HR_MEETING, TECHNICAL_INTERVIEW, FINAL_INTERVIEW, HIRED, REJECTED
     
     # Optional fields
     cover_letter = Column(Text)

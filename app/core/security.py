@@ -1,10 +1,16 @@
 from datetime import datetime, timedelta
-from typing import Optional, Union
+from typing import Optional, Union, Set
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from app.core.config import settings
+import hashlib
+import threading
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# In-memory token blacklist (use Redis in production)
+_token_blacklist: Set[str] = set()
+_blacklist_lock = threading.Lock()
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -43,15 +49,65 @@ def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) 
     return encoded_jwt
 
 
+def _get_token_hash(token: str) -> str:
+    """Generate a hash of the token for blacklist storage"""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def blacklist_token(token: str) -> None:
+    """Add token to blacklist"""
+    token_hash = _get_token_hash(token)
+    with _blacklist_lock:
+        _token_blacklist.add(token_hash)
+
+
+def is_token_blacklisted(token: str) -> bool:
+    """Check if token is blacklisted"""
+    token_hash = _get_token_hash(token)
+    with _blacklist_lock:
+        return token_hash in _token_blacklist
+
+
+def cleanup_expired_tokens() -> None:
+    """Clean up expired tokens from blacklist (should be called periodically)"""
+    # For in-memory implementation, we'll clean up tokens older than max refresh time
+    # In production with Redis, use TTL instead
+    pass
+
+
 def verify_token(token: str, token_type: str = "access") -> Optional[str]:
     """Verify JWT token and return subject (user_id) if valid"""
     try:
+        # Check if token is blacklisted first
+        if is_token_blacklisted(token):
+            return None
+
         payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
         user_id: str = payload.get("sub")
         token_type_payload: str = payload.get("type")
-        
+
         if user_id is None or token_type_payload != token_type:
             return None
         return user_id
     except JWTError:
         return None
+
+
+def get_token_expiration(token: str) -> Optional[datetime]:
+    """Get token expiration time"""
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        exp = payload.get("exp")
+        if exp:
+            return datetime.fromtimestamp(exp)
+        return None
+    except JWTError:
+        return None
+
+
+def is_token_expired(token: str) -> bool:
+    """Check if token is expired"""
+    exp_time = get_token_expiration(token)
+    if exp_time is None:
+        return True
+    return datetime.utcnow() > exp_time

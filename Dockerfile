@@ -24,9 +24,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY alembic.ini .
 COPY migrations ./migrations
+COPY scripts ./scripts
 
-# Create non-root user for security
-RUN useradd -m runner && chown -R runner:runner /app
+# Create non-root user for security and set permissions
+RUN useradd -m runner && \
+    chown -R runner:runner /app && \
+    chmod +x /app/scripts/*.sh /app/scripts/*.py
 USER runner
 
 # Expose port
