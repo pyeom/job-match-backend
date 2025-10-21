@@ -30,7 +30,7 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
-    
+
     # Create new user
     hashed_password = get_password_hash(user_data.password)
     db_user = User(
@@ -40,15 +40,15 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
         full_name=user_data.full_name,
         role=user_data.role
     )
-    
+
     db.add(db_user)
     await db.commit()
     await db.refresh(db_user)
-    
+
     # Create tokens
     access_token = create_access_token(data={"sub": str(db_user.id)})
     refresh_token = create_refresh_token(data={"sub": str(db_user.id)})
-    
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -67,11 +67,11 @@ async def register_company_user(user_data: CompanyUserCreate, db: AsyncSession =
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered"
         )
-    
+
     # Check if company already exists
     result = await db.execute(select(Company).where(Company.name == user_data.company_name))
     db_company = result.scalar_one_or_none()
-    
+
     if db_company:
         # Check if company is active
         if not db_company.is_active:
@@ -94,7 +94,7 @@ async def register_company_user(user_data: CompanyUserCreate, db: AsyncSession =
         db.add(db_company)
         await db.flush()  # Get the company ID
         company_id = db_company.id
-    
+
     # Create new company user
     hashed_password = get_password_hash(user_data.password)
     db_user = User(
@@ -105,15 +105,15 @@ async def register_company_user(user_data: CompanyUserCreate, db: AsyncSession =
         role=user_data.role,
         company_id=company_id
     )
-    
+
     db.add(db_user)
     await db.commit()
     await db.refresh(db_user)
-    
+
     # Create tokens
     access_token = create_access_token(data={"sub": str(db_user.id)})
     refresh_token = create_refresh_token(data={"sub": str(db_user.id)})
-    
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -127,18 +127,18 @@ async def login(user_credentials: UserLogin, db: AsyncSession = Depends(get_db))
     # Get user by email
     result = await db.execute(select(User).where(User.email == user_credentials.email))
     user = result.scalar_one_or_none()
-    
+
     if not user or not verify_password(user_credentials.password, user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     # Create tokens
     access_token = create_access_token(data={"sub": str(user.id)})
     refresh_token = create_refresh_token(data={"sub": str(user.id)})
-    
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,

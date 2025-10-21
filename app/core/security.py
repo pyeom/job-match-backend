@@ -5,8 +5,13 @@ from passlib.context import CryptContext
 from app.core.config import settings
 import hashlib
 import threading
+import os
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Configure bcrypt - we handle 72-byte limit manually in get_password_hash()
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto"
+)
 
 # In-memory token blacklist (use Redis in production)
 _token_blacklist: Set[str] = set()
@@ -15,11 +20,19 @@ _blacklist_lock = threading.Lock()
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against a hash"""
+    # Truncate password to 72 bytes if needed (bcrypt limitation)
+    if len(plain_password.encode('utf-8')) > 72:
+        plain_password = plain_password.encode('utf-8')[:72].decode('utf-8', errors='ignore')
     return pwd_context.verify(plain_password, hashed_password)
 
 
 def get_password_hash(password: str) -> str:
-    """Hash a password"""
+    """Hash a password with bcrypt (truncates to 72 bytes as required)"""
+    # Bcrypt has a hard limit of 72 bytes. Truncate before hashing.
+    password_bytes = password.encode('utf-8')
+    if len(password_bytes) > 72:
+        # Truncate to 72 bytes, ensuring we don't break UTF-8 encoding
+        password = password_bytes[:72].decode('utf-8', errors='ignore')
     return pwd_context.hash(password)
 
 

@@ -179,8 +179,9 @@ class EmbeddingService:
                 return 0.0
             
             similarity = dot_product / (norm1 * norm2)
-            # Ensure similarity is between 0 and 1
-            return max(0.0, min(1.0, similarity))
+            # Convert to float if numpy scalar, ensure similarity is between 0 and 1
+            similarity_float = float(similarity)
+            return max(0.0, min(1.0, similarity_float))
             
         except Exception as e:
             logger.error(f"Failed to calculate similarity: {e}")

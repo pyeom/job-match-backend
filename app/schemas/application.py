@@ -109,6 +109,24 @@ class ApplicationStatusFilter(BaseModel):
     locations: Optional[List[str]] = None
 
 
+class ApplicationWithUserResponse(BaseModel):
+    """Flattened application response format expected by frontend"""
+    id: uuid.UUID
+    job_id: uuid.UUID
+    job_title: str
+    user_id: uuid.UUID
+    user_email: str
+    user_full_name: Optional[str] = None
+    user_headline: Optional[str] = None
+    user_skills: Optional[List[str]] = None
+    status: str  # Frontend format: SUBMITTED, ACCEPTED, REJECTED
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class ApplicationExport(BaseModel):
     """Application data for export"""
     application_id: uuid.UUID

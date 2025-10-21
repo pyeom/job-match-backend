@@ -50,7 +50,7 @@ async def discover_jobs(
     db: AsyncSession = Depends(get_db)
 ):
     """Get personalized job recommendations (discover feed)
-    
+
     This endpoint implements ML-driven job recommendations using:
     - Vector similarity search with pgvector
     - Hybrid scoring combining embeddings + rule-based factors
@@ -60,7 +60,7 @@ async def discover_jobs(
     from app.models.swipe import Swipe
     from app.services.scoring_service import scoring_service
     from app.services.embedding_service import embedding_service
-    
+
     # Parse cursor if provided
     cursor_score = None
     cursor_job_id = None
@@ -86,7 +86,7 @@ async def discover_jobs(
     )
 
     # If user has a profile embedding, use vector similarity search with larger pool
-    if current_user.profile_embedding:
+    if current_user.profile_embedding is not None:
         # Get larger candidate pool using vector similarity (e.g., top 300)
         # Increase pool size to account for cursor filtering
         candidate_limit = min(500, limit * 25)  # Get 25x more candidates for re-ranking
@@ -155,7 +155,7 @@ async def discover_jobs(
 
         # Give all jobs a baseline score
         top_jobs = [(job, 65) for job in jobs]
-    
+
     # Determine if there are more results and prepare items
     has_more = len(top_jobs) > limit
     items_to_return = top_jobs[:limit]  # Remove the extra item used for has_more check
@@ -221,8 +221,8 @@ async def get_job(
         .where(Job.id == job_id, Job.is_active == True)
     )
     job = result.scalar_one_or_none()
-    
+
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     return job
