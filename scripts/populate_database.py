@@ -46,7 +46,6 @@ from app.models.user import User, UserRole
 from app.models.company import Company
 from app.models.job import Job
 from app.models.application import Application
-from app.models.swipe import Swipe
 from app.models.interaction import Interaction
 from app.core.config import settings
 from app.services.embedding_service import embedding_service
@@ -232,9 +231,6 @@ class DatabasePopulator:
         async with AsyncSessionLocal() as session:
             try:
                 # Delete in proper order to respect foreign keys
-                await session.execute(delete(Interaction))
-                await session.execute(delete(Application))
-                await session.execute(delete(Swipe))
                 await session.execute(delete(Job))
                 await session.execute(delete(User))
                 await session.execute(delete(Company))
@@ -657,103 +653,6 @@ Join our growing engineering team and help scale our data platform to millions o
         self.created_users = created_users
         return created_users
 
-    async def create_interactions(self):
-        """Create realistic swipe patterns, applications, and interactions directly in database"""
-        logger.info("🔗 Creating swipes, applications, and interactions...")
-
-        async with AsyncSessionLocal() as session:
-            try:
-                # Get all users and jobs from the database
-                users_result = await session.execute(select(User).where(User.role == UserRole.JOB_SEEKER))
-                users = users_result.scalars().all()
-
-                jobs_result = await session.execute(select(Job))
-                jobs = jobs_result.scalars().all()
-
-                if not users or not jobs:
-                    logger.warning("No users or jobs found for creating interactions")
-                    return
-
-                # Create realistic swipe patterns for each user
-                for user in users:
-                    user_jobs = random.sample(jobs, min(len(jobs), random.randint(4, 6)))  # Each user sees 4-6 jobs
-
-                    for job in user_jobs:
-                        # Create realistic swipe patterns
-                        # 60% chance of RIGHT swipe, 40% chance of LEFT swipe
-                        direction = "RIGHT" if random.random() < 0.6 else "LEFT"
-
-                        # Create swipe
-                        swipe = Swipe(
-                            user_id=user.id,
-                            job_id=job.id,
-                            direction=direction,
-                            created_at=datetime.now() - timedelta(days=random.randint(1, 30))
-                        )
-                        session.add(swipe)
-
-                        # Calculate score for interaction
-                        try:
-                            user_embedding = user.profile_embedding or [0.0] * 384
-                            job_embedding = job.job_embedding or [0.0] * 384
-
-                            score = scoring_service.calculate_job_score(
-                                user_embedding=user_embedding,
-                                job_embedding=job_embedding,
-                                user_skills=user.skills or [],
-                                user_seniority=user.seniority,
-                                user_preferences=user.preferred_locations or [],
-                                job_tags=job.tags or [],
-                                job_seniority=job.seniority,
-                                job_location=job.location,
-                                job_remote=job.remote,
-                                job_created_at=job.created_at
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to calculate score for job {job.id}: {e}")
-                            score = 50  # Default score
-
-                        # Create interaction record
-                        interaction = Interaction(
-                            user_id=user.id,
-                            job_id=job.id,
-                            score_at_view=score,
-                            action=direction,
-                            view_duration_ms=random.randint(2000, 30000),  # 2-30 seconds
-                            created_at=swipe.created_at
-                        )
-                        session.add(interaction)
-
-                        # If RIGHT swipe, create application
-                        if direction == "RIGHT":
-                            # Random application status based on realistic progression
-                            status_options = [
-                                "SUBMITTED", "SUBMITTED", "SUBMITTED",  # Most common
-                                "WAITING_FOR_REVIEW", "WAITING_FOR_REVIEW",
-                                "HR_MEETING", "TECHNICAL_INTERVIEW",
-                                "FINAL_INTERVIEW", "HIRED", "REJECTED"
-                            ]
-                            status = random.choice(status_options)
-
-                            application = Application(
-                                user_id=user.id,
-                                job_id=job.id,
-                                status=status,
-                                cover_letter=f"I am very interested in the {job.title} position. My skills in {', '.join((user.skills or [])[:3])} make me a great fit for this role.",
-                                notes=f"Application created via database population. Score: {score}",
-                                created_at=swipe.created_at,
-                                updated_at=swipe.created_at + timedelta(days=random.randint(1, 7))
-                            )
-                            session.add(application)
-
-                await session.commit()
-                logger.info("✅ Successfully created swipes, applications, and interactions")
-
-            except Exception as e:
-                await session.rollback()
-                logger.error(f"Failed to create interactions: {e}")
-                raise
-
     async def validate_data(self) -> Dict:
         """Validate that all data was created successfully"""
         logger.info("🔍 Validating created data...")
@@ -906,10 +805,6 @@ async def main():
 
             if args.all or args.users_only:
                 await populator.create_job_seekers()
-
-            # Create interactions (swipes, applications) if creating all data
-            if args.all:
-                await populator.create_interactions()
 
             # Validate data
             if not args.validate_only:
