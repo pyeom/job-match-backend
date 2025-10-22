@@ -231,6 +231,8 @@ class DatabasePopulator:
         async with AsyncSessionLocal() as session:
             try:
                 # Delete in proper order to respect foreign keys
+                await session.execute(delete(Interaction))
+                await session.execute(delete(Application))
                 await session.execute(delete(Job))
                 await session.execute(delete(User))
                 await session.execute(delete(Company))
@@ -653,6 +655,89 @@ Join our growing engineering team and help scale our data platform to millions o
         self.created_users = created_users
         return created_users
 
+    async def create_sample_applications(self) -> List[Dict]:
+        """Create sample applications with varied stages and statuses"""
+        logger.info("📋 Creating sample applications...")
+
+        if not self.created_users or not self.created_jobs:
+            logger.warning("⚠️  No users or jobs found. Skipping applications creation.")
+            return []
+
+        stages = ['SUBMITTED', 'REVIEW', 'INTERVIEW', 'TECHNICAL', 'DECISION']
+        statuses = ['ACTIVE', 'HIRED', 'REJECTED']
+
+        rejection_reasons = [
+            'Not enough experience',
+            'Skills mismatch',
+            'Compensation expectations too high',
+            'Position filled',
+            'Not a cultural fit',
+            'Candidate withdrew application'
+        ]
+
+        created_applications = []
+
+        async with AsyncSessionLocal() as session:
+            try:
+                # Get all job and user IDs
+                job_ids = [uuid.UUID(job["job_data"]["id"]) for job in self.created_jobs]
+                user_ids = [uuid.UUID(user["profile"]["id"]) for user in self.created_users]
+
+                # Create 2-4 applications per job
+                for job_data in self.created_jobs:
+                    job_id = uuid.UUID(job_data["job_data"]["id"])
+                    num_applications = random.randint(2, 4)
+
+                    # Select random users for this job (avoid duplicates)
+                    selected_users = random.sample(user_ids, min(num_applications, len(user_ids)))
+
+                    for user_id in selected_users:
+                        # Distribute across stages realistically - more in early stages
+                        stage_weights = [0.4, 0.25, 0.15, 0.1, 0.1]  # More in SUBMITTED, fewer in DECISION
+                        stage = random.choices(stages, weights=stage_weights)[0]
+
+                        # Determine status based on stage
+                        if stage == 'DECISION':
+                            # In DECISION stage, higher chance of terminal state
+                            status = random.choices(['ACTIVE', 'HIRED', 'REJECTED'], weights=[0.3, 0.4, 0.3])[0]
+                        else:
+                            # In other stages, mostly ACTIVE, some REJECTED
+                            status = random.choices(['ACTIVE', 'REJECTED'], weights=[0.85, 0.15])[0]
+
+                        # Set rejection_reason if REJECTED
+                        rejection_reason = None
+                        if status == 'REJECTED':
+                            rejection_reason = random.choice(rejection_reasons)
+
+                        # Create application
+                        application = Application(
+                            user_id=user_id,
+                            job_id=job_id,
+                            stage=stage,
+                            status=status,
+                            stage_updated_at=datetime.utcnow() - timedelta(days=random.randint(0, 30)),
+                            rejection_reason=rejection_reason,
+                            stage_history=[],  # Empty history for new applications
+                            created_at=datetime.utcnow() - timedelta(days=random.randint(1, 60))
+                        )
+                        session.add(application)
+                        created_applications.append({
+                            "user_id": str(user_id),
+                            "job_id": str(job_id),
+                            "stage": stage,
+                            "status": status
+                        })
+
+                await session.commit()
+                logger.info(f"✅ Created {len(created_applications)} sample applications")
+
+            except Exception as e:
+                await session.rollback()
+                logger.error(f"❌ Failed to create applications: {e}")
+                raise DatabasePopulationError(f"Failed to create applications: {e}")
+
+        return created_applications
+
     async def validate_data(self) -> Dict:
         """Validate that all data was created successfully"""
         logger.info("🔍 Validating created data...")
@@ -805,6 +890,10 @@ async def main():
 
             if args.all or args.users_only:
                 await populator.create_job_seekers()
+
+            # Create sample applications
+            if args.all:
+                await populator.create_sample_applications()
 
             # Validate data
             if not args.validate_only:

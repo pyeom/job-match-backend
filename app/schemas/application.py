@@ -1,7 +1,12 @@
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, model_validator
+from typing import Optional, List, Literal
 from datetime import datetime
 import uuid
+
+
+# Stage and Status type definitions
+ApplicationStage = Literal['SUBMITTED', 'REVIEW', 'INTERVIEW', 'TECHNICAL', 'DECISION']
+ApplicationStatus = Literal['ACTIVE', 'HIRED', 'REJECTED']
 
 
 class ApplicationCreate(BaseModel):
@@ -10,9 +15,17 @@ class ApplicationCreate(BaseModel):
 
 
 class ApplicationUpdate(BaseModel):
-    status: Optional[str] = None  # SUBMITTED, WAITING_FOR_REVIEW, HR_MEETING, TECHNICAL_INTERVIEW, FINAL_INTERVIEW, HIRED, REJECTED
+    """Update application stage and/or status"""
+    stage: Optional[ApplicationStage] = None
+    status: Optional[ApplicationStatus] = None
+    rejection_reason: Optional[str] = None
     notes: Optional[str] = None
-    cover_letter: Optional[str] = None
+
+    @model_validator(mode='after')
+    def validate_rejection_reason(self):
+        if self.status == 'REJECTED' and not self.rejection_reason:
+            raise ValueError('rejection_reason is required when status is REJECTED')
+        return self
 
 
 class BulkApplicationUpdate(BaseModel):
@@ -46,15 +59,19 @@ class JobBasicInfo(BaseModel):
 
 
 class Application(BaseModel):
+    """Base application schema"""
     id: uuid.UUID
     user_id: uuid.UUID
     job_id: uuid.UUID
-    status: str
+    stage: ApplicationStage
+    status: ApplicationStatus
+    stage_updated_at: datetime
+    rejection_reason: Optional[str]
     cover_letter: Optional[str]
     notes: Optional[str]
     created_at: datetime
     updated_at: Optional[datetime]
-    
+
     class Config:
         from_attributes = True
 
@@ -110,7 +127,7 @@ class ApplicationStatusFilter(BaseModel):
 
 
 class ApplicationWithUserResponse(BaseModel):
-    """Flattened application response format expected by frontend"""
+    """Flattened application response with stage and status"""
     id: uuid.UUID
     job_id: uuid.UUID
     job_title: str
@@ -119,7 +136,10 @@ class ApplicationWithUserResponse(BaseModel):
     user_full_name: Optional[str] = None
     user_headline: Optional[str] = None
     user_skills: Optional[List[str]] = None
-    status: str  # Frontend format: SUBMITTED, ACCEPTED, REJECTED
+    stage: ApplicationStage
+    status: ApplicationStatus
+    stage_updated_at: datetime
+    rejection_reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

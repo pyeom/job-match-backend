@@ -14,6 +14,7 @@ from app.models.application import Application
 from app.models.company import Company
 from app.schemas.company import PaginatedResponse
 from app.schemas.application import (
+    ApplicationUpdate,
     ApplicationWithDetails,
     ApplicationWithUserResponse,
     UserBasicInfo,
@@ -24,8 +25,35 @@ from pydantic import BaseModel
 import uuid
 
 
-class ApplicationStatusUpdate(BaseModel):
-    status: str
+# Stage transition validation
+VALID_STAGES = ['SUBMITTED', 'REVIEW', 'INTERVIEW', 'TECHNICAL', 'DECISION']
+
+STAGE_TRANSITIONS = {
+    'SUBMITTED': ['REVIEW'],
+    'REVIEW': ['INTERVIEW', 'SUBMITTED'],  # Can go back
+    'INTERVIEW': ['TECHNICAL', 'REVIEW'],  # Can go back
+    'TECHNICAL': ['DECISION', 'INTERVIEW'],  # Can go back
+    'DECISION': ['TECHNICAL']  # Can go back
+}
+
+
+def validate_stage_transition(current_stage: str, new_stage: str) -> bool:
+    """Validate if stage transition is allowed"""
+    if current_stage == new_stage:
+        return True  # No change is valid
+
+    # Forward progression
+    if new_stage in STAGE_TRANSITIONS.get(current_stage, []):
+        return True
+
+    # Backward progression (allow going back to any previous stage)
+    stage_order = VALID_STAGES
+    current_idx = stage_order.index(current_stage)
+    new_idx = stage_order.index(new_stage)
+    if new_idx < current_idx:
+        return True
+
+    return False
 
 
 router = APIRouter()
@@ -38,11 +66,12 @@ async def get_job_applications(
     limit: int = Query(50, ge=1, le=100),
     page: int = Query(1, ge=1),
     offset: Optional[int] = Query(None, ge=0),
-    status_filter: Optional[str] = Query(None),
+    stage_filter: Optional[str] = Query(None),  # NEW: Filter by stage
+    status_filter: Optional[str] = Query(None),  # Updated: Filter by status (ACTIVE, HIRED, REJECTED)
     current_user: User = Depends(get_company_user_with_verification),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get all applications for a specific job"""
+    """Get all applications for a specific job with stage/status filtering"""
     # Verify company access
     require_company_access(current_user, company_id)
 
@@ -69,7 +98,11 @@ async def get_job_applications(
         .where(Application.job_id == job_id)
     )
 
-    # Apply status filter
+    # Apply stage filter (NEW)
+    if stage_filter:
+        base_query = base_query.where(Application.stage == stage_filter)
+
+    # Apply status filter (UPDATED)
     if status_filter:
         base_query = base_query.where(Application.status == status_filter)
 
@@ -136,12 +169,25 @@ async def get_job_applications(
 @router.patch("/applications/{application_id}", response_model=ApplicationWithUserResponse)
 async def update_application_status(
     application_id: uuid.UUID,
-    status_update: ApplicationStatusUpdate,
+    update_data: ApplicationUpdate,
     current_user: User = Depends(get_company_user_with_verification),
     db: AsyncSession = Depends(get_db)
 ):
-    """Update application status"""
-    # Get application with job, user and verify company access
+    """
+    Update application stage and/or status
+
+    - **stage**: Move to new pipeline stage (SUBMITTED, REVIEW, INTERVIEW, TECHNICAL, DECISION)
+    - **status**: Set final status (ACTIVE, HIRED, REJECTED)
+    - **rejection_reason**: Required when status=REJECTED
+    - **notes**: Internal notes
+
+    Validation rules:
+    - Cannot modify applications in terminal state (HIRED/REJECTED)
+    - Stage transitions must be valid (can move forward sequentially or backward)
+    - Rejection requires rejection_reason
+    - Stage and status can be updated independently or together
+    """
+    # Get application with job and user
     result = await db.execute(
         select(Application, User, Job)
         .select_from(Application)
@@ -157,40 +203,62 @@ async def update_application_status(
     application, user, job = row
     require_company_access(current_user, job.company_id)
 
-    # Map frontend status to backend status
-    def map_status_to_backend(frontend_status: str) -> str:
-        status_mapping = {
-            'ACCEPTED': 'HIRED',
-            'REJECTED': 'REJECTED',
-            'HIRED': 'HIRED',
-            'SUBMITTED': 'SUBMITTED',
-            'WAITING_FOR_REVIEW': 'WAITING_FOR_REVIEW',
-            'HR_MEETING': 'HR_MEETING',
-            'TECHNICAL_INTERVIEW': 'TECHNICAL_INTERVIEW',
-            'FINAL_INTERVIEW': 'FINAL_INTERVIEW'
-        }
-        return status_mapping.get(frontend_status, frontend_status)
+    # Validate: Cannot modify terminal state applications
+    if application.status in ['HIRED', 'REJECTED']:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot modify application in terminal state ({application.status})"
+        )
 
-    def map_status_to_frontend(backend_status: str) -> str:
-        status_mapping = {
-            'HIRED': 'ACCEPTED',
-            'REJECTED': 'REJECTED',
-            'SUBMITTED': 'SUBMITTED',
-            'WAITING_FOR_REVIEW': 'SUBMITTED',
-            'HR_MEETING': 'SUBMITTED',
-            'TECHNICAL_INTERVIEW': 'SUBMITTED',
-            'FINAL_INTERVIEW': 'SUBMITTED'
-        }
-        return status_mapping.get(backend_status, backend_status)
+    # Track if stage changed for stage_updated_at
+    stage_changed = False
 
-    backend_status = map_status_to_backend(status_update.status)
+    # Validate and update stage
+    if update_data.stage is not None:
+        if not validate_stage_transition(application.stage, update_data.stage):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid stage transition from {application.stage} to {update_data.stage}"
+            )
+        if application.stage != update_data.stage:
+            stage_changed = True
+
+            # Update stage_history
+            if application.stage_history is None:
+                application.stage_history = []
+
+            application.stage_history.append({
+                "from_stage": application.stage,
+                "to_stage": update_data.stage,
+                "timestamp": datetime.utcnow().isoformat(),
+                "changed_by": str(current_user.id)
+            })
+
+            application.stage = update_data.stage
 
     # Update status
-    application.status = backend_status
+    if update_data.status is not None:
+        if update_data.status == 'REJECTED' and not update_data.rejection_reason:
+            raise HTTPException(
+                status_code=400,
+                detail="rejection_reason is required when status=REJECTED"
+            )
+        application.status = update_data.status
+        if update_data.rejection_reason:
+            application.rejection_reason = update_data.rejection_reason
+
+    # Update other fields
+    if update_data.notes is not None:
+        application.notes = update_data.notes
+
+    # Update stage_updated_at if stage changed
+    if stage_changed:
+        application.stage_updated_at = func.now()
+
     await db.commit()
     await db.refresh(application)
 
-    # Return flattened response format
+    # Return new format (no more status mapping)
     return ApplicationWithUserResponse(
         id=application.id,
         job_id=application.job_id,
@@ -200,7 +268,10 @@ async def update_application_status(
         user_full_name=user.full_name,
         user_headline=user.headline,
         user_skills=user.skills,
-        status=map_status_to_frontend(application.status),
+        stage=application.stage,
+        status=application.status,
+        stage_updated_at=application.stage_updated_at,
+        rejection_reason=application.rejection_reason,
         created_at=application.created_at,
         updated_at=application.updated_at or application.created_at
     )
@@ -211,7 +282,8 @@ async def get_all_company_applications(
     limit: int = Query(50, ge=1, le=100),
     page: int = Query(1, ge=1),
     offset: Optional[int] = Query(None, ge=0),
-    status_filter: Optional[str] = Query(None),
+    stage_filter: Optional[str] = Query(None),  # NEW: Filter by stage
+    status_filter: Optional[str] = Query(None),  # Updated: Filter by status (ACTIVE, HIRED, REJECTED)
     seniority_filter: Optional[str] = Query(None),
     location_filter: Optional[str] = Query(None),
     created_after: Optional[datetime] = Query(None),
@@ -219,7 +291,7 @@ async def get_all_company_applications(
     current_user: User = Depends(get_company_user_with_verification),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get all applications for the company with filtering and search capabilities"""
+    """Get all applications for company with stage/status filtering"""
     company_id = current_user.company_id
 
     # Calculate offset from page if not provided directly
@@ -236,6 +308,9 @@ async def get_all_company_applications(
     )
 
     # Apply filters
+    if stage_filter:
+        base_query = base_query.where(Application.stage == stage_filter)
+
     if status_filter:
         base_query = base_query.where(Application.status == status_filter)
 
@@ -261,20 +336,7 @@ async def get_all_company_applications(
     result = await db.execute(paginated_query)
     rows = result.all()
 
-    # Transform to flattened response format expected by frontend
-    def map_status_to_frontend(backend_status: str) -> str:
-        """Map backend status to frontend status"""
-        status_mapping = {
-            'HIRED': 'ACCEPTED',
-            'REJECTED': 'REJECTED',
-            'SUBMITTED': 'SUBMITTED',
-            'WAITING_FOR_REVIEW': 'SUBMITTED',
-            'HR_MEETING': 'SUBMITTED',
-            'TECHNICAL_INTERVIEW': 'SUBMITTED',
-            'FINAL_INTERVIEW': 'SUBMITTED'
-        }
-        return status_mapping.get(backend_status, backend_status)
-
+    # Transform to flattened response format - NO MORE STATUS MAPPING
     applications_with_user_response = []
     for app, user, job in rows:
         flattened_app = ApplicationWithUserResponse(
@@ -286,7 +348,10 @@ async def get_all_company_applications(
             user_full_name=user.full_name,
             user_headline=user.headline,
             user_skills=user.skills,
-            status=map_status_to_frontend(app.status),
+            stage=app.stage,  # NEW: Direct stage
+            status=app.status,  # NEW: Direct status
+            stage_updated_at=app.stage_updated_at,  # NEW
+            rejection_reason=app.rejection_reason,  # NEW
             created_at=app.created_at,
             updated_at=app.updated_at or app.created_at
         )
