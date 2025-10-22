@@ -66,7 +66,7 @@ async def create_swipe(
             application = Application(
                 user_id=current_user.id,
                 job_id=swipe_data.job_id,
-                status="SUBMITTED"
+                status="ACTIVE"
             )
             db.add(application)
             await db.commit()

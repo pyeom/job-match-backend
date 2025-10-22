@@ -33,6 +33,8 @@ class User(Base):
     preferred_locations = Column(JSON)  # List of preferred locations
     seniority = Column(String(50))  # Junior, Mid, Senior, Lead, etc.
     phone = Column(String(20))  # Phone number
+    experience = Column(JSON)  # List of work experience objects
+    education = Column(JSON)  # List of education objects
     
     # ML embedding for user profile (384 dimensions for all-MiniLM-L6-v2)
     profile_embedding = Column(Vector(384))
