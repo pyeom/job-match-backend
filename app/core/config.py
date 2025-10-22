@@ -36,6 +36,7 @@ class Settings(BaseSettings):
         "http://localhost:19006",  # Expo web
         "http://localhost:8081",   # Expo Metro
         "exp://localhost:19000",   # Expo development
+        os.getenv("FRONTEND_URL")
     ]
     
     class Config:
