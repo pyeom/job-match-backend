@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, computed_field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import uuid
@@ -66,6 +66,14 @@ class UserInDB(UserBase):
 
 class User(UserInDB):
     company: Optional[CompanyPublic] = None
+
+    @computed_field
+    @property
+    def user_type(self) -> str:
+        """Computed field to provide user_type for frontend compatibility"""
+        if self.role in [UserRole.COMPANY_ADMIN, UserRole.COMPANY_RECRUITER]:
+            return "company"
+        return "job_seeker"
 
 
 class UserProfile(User):
