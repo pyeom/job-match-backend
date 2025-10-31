@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     )
     access_token_expires: int = Field(default=900, env="ACCESS_TOKEN_EXPIRES")  # 15 minutes
     refresh_token_expires: int = Field(default=604800, env="REFRESH_TOKEN_EXPIRES")  # 7 days
-    embedding_model: str = Field(default="sentence-transformers/all-MiniLM-L6-v2", env="EMBEDDING_MODEL")
+    embedding_model: str = Field(default="all-MiniLM-L6-v2", env="EMBEDDING_MODEL")
     
     @property
     def database_url(self) -> str:
