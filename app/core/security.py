@@ -124,3 +124,15 @@ def is_token_expired(token: str) -> bool:
     if exp_time is None:
         return True
     return datetime.utcnow() > exp_time
+
+
+def decode_token(token: str) -> Optional[dict]:
+    """Decode JWT token and return payload if valid"""
+    try:
+        if is_token_blacklisted(token):
+            return None
+
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        return payload
+    except JWTError:
+        return None

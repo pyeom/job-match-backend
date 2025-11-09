@@ -3,6 +3,7 @@ from .user import User, UserBase, UserUpdate
 from .job import Job, JobBase, JobCreate, JobUpdate, JobInDB
 from .swipe import Swipe, SwipeCreate
 from .application import Application, ApplicationCreate, ApplicationUpdate
+from .push_token import PushTokenCreate, PushTokenResponse, PushTokenDeleteResponse
 from .statistics import (
     JobApplicationStats,
     CompanyApplicationMetrics,
@@ -27,6 +28,7 @@ __all__ = [
     "Job", "JobBase", "JobCreate", "JobUpdate", "JobInDB",
     "Swipe", "SwipeCreate",
     "Application", "ApplicationCreate", "ApplicationUpdate",
+    "PushTokenCreate", "PushTokenResponse", "PushTokenDeleteResponse",
     "JobApplicationStats",
     "CompanyApplicationMetrics",
     "JobApplicationCount",

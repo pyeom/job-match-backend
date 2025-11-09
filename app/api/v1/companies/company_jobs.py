@@ -61,27 +61,17 @@ class ApplicationCounts(BaseModel):
     rejected: int
 
 
-class RecentApplicant(BaseModel):
-    """Basic information about recent applicant"""
-    id: uuid.UUID  # application id
-    user_id: uuid.UUID  # user id
-    user_full_name: Optional[str] = None
-    user_email: str
-    applied_at: datetime
-    status: str
-
-
 class JobWithApplications(BaseModel):
-    """Job information with application counts and recent applicants"""
+    """Job information with application stage and status counts"""
     id: uuid.UUID
     title: str
     location: Optional[str] = None
     created_at: datetime
-    status: str  # "active" or "inactive"
-    application_counts: ApplicationCounts
-    recent_applicants: list[RecentApplicant]
+    is_active: bool
     needs_attention: bool  # True if there are pending applications
-    has_new_applications: bool  # True if there are applications from last 24 hours
+    total_applications: int
+    stage_counts: dict[str, int]  # SUBMITTED, REVIEW, INTERVIEW, TECHNICAL, DECISION
+    status_counts: dict[str, int]  # ACTIVE, HIRED, REJECTED
 
 
 class JobsWithApplicationsResponse(BaseModel):
@@ -446,11 +436,8 @@ async def get_jobs_with_applications(
     # filter == "all" doesn't add additional filter
     # filter == "needs_attention" will be handled after we get the results (needs pending applications > 0)
 
-    # Main query to get jobs with aggregated application counts
+    # Main query to get jobs with aggregated application counts by stage and status
     # Using efficient SQL to avoid N+1 queries
-    # Calculate threshold for new applications (last 24 hours)
-    twenty_four_hours_ago = datetime.now() - timedelta(hours=24)
-
     jobs_query = (
         select(
             Job.id,
@@ -459,10 +446,16 @@ async def get_jobs_with_applications(
             Job.created_at,
             Job.is_active,
             func.count(Application.id).label("total_applications"),
-            func.count(case((Application.status == "SUBMITTED", 1))).label("pending_applications"),
-            func.count(case((Application.status == "HIRED", 1))).label("accepted_applications"),
-            func.count(case((Application.status == "REJECTED", 1))).label("rejected_applications"),
-            func.count(case((Application.created_at >= twenty_four_hours_ago, 1))).label("new_applications_count"),
+            # Stage counts
+            func.count(case((Application.stage == "SUBMITTED", 1))).label("stage_submitted"),
+            func.count(case((Application.stage == "REVIEW", 1))).label("stage_review"),
+            func.count(case((Application.stage == "INTERVIEW", 1))).label("stage_interview"),
+            func.count(case((Application.stage == "TECHNICAL", 1))).label("stage_technical"),
+            func.count(case((Application.stage == "DECISION", 1))).label("stage_decision"),
+            # Status counts
+            func.count(case((Application.status == "ACTIVE", 1))).label("status_active"),
+            func.count(case((Application.status == "HIRED", 1))).label("status_hired"),
+            func.count(case((Application.status == "REJECTED", 1))).label("status_rejected"),
             func.max(Application.created_at).label("most_recent_application_at")
         )
         .select_from(Job)
@@ -491,116 +484,42 @@ async def get_jobs_with_applications(
 
     # Prepare jobs list with application data
     jobs_with_applications = []
-    total_applications_overall = 0
-    job_ids = []
 
     for row in job_rows:
-        job_id = row.id
-        job_ids.append(job_id)
-
         total_apps = row.total_applications or 0
-        pending_apps = row.pending_applications or 0
-        accepted_apps = row.accepted_applications or 0
-        rejected_apps = row.rejected_applications or 0
-        new_apps_count = row.new_applications_count or 0
 
-        total_applications_overall += total_apps
+        # Build stage counts dictionary
+        stage_counts = {
+            "SUBMITTED": row.stage_submitted or 0,
+            "REVIEW": row.stage_review or 0,
+            "INTERVIEW": row.stage_interview or 0,
+            "TECHNICAL": row.stage_technical or 0,
+            "DECISION": row.stage_decision or 0
+        }
 
-        # Map backend status to frontend status for display
-        def map_status_to_frontend(backend_status: str) -> str:
-            status_mapping = {
-                'HIRED': 'ACCEPTED',
-                'REJECTED': 'REJECTED',
-                'SUBMITTED': 'SUBMITTED',
-                'WAITING_FOR_REVIEW': 'SUBMITTED',
-                'HR_MEETING': 'SUBMITTED',
-                'TECHNICAL_INTERVIEW': 'SUBMITTED',
-                'FINAL_INTERVIEW': 'SUBMITTED'
-            }
-            return status_mapping.get(backend_status, backend_status)
+        # Build status counts dictionary
+        status_counts = {
+            "ACTIVE": row.status_active or 0,
+            "HIRED": row.status_hired or 0,
+            "REJECTED": row.status_rejected or 0
+        }
 
-        application_counts = ApplicationCounts(
-            total=total_apps,
-            pending=pending_apps,
-            accepted=accepted_apps,
-            rejected=rejected_apps
-        )
+        # Needs attention if there are any ACTIVE applications (regardless of stage)
+        needs_attention = status_counts["ACTIVE"] > 0
 
         job_with_apps = JobWithApplications(
-            id=job_id,
+            id=row.id,
             title=row.title,
             location=row.location,
             created_at=row.created_at,
-            status="active" if row.is_active else "inactive",
-            application_counts=application_counts,
-            recent_applicants=[],  # We'll populate this in the next query
-            needs_attention=pending_apps > 0,
-            has_new_applications=new_apps_count > 0
+            is_active=row.is_active,
+            needs_attention=needs_attention,
+            total_applications=total_apps,
+            stage_counts=stage_counts,
+            status_counts=status_counts
         )
 
         jobs_with_applications.append(job_with_apps)
-
-    # If we have jobs, get recent applicants for each job (limit to 3 per job to avoid large responses)
-    if job_ids:
-        # Use window function to get the 3 most recent applicants per job efficiently
-        recent_applicants_query = text("""
-            WITH ranked_applications AS (
-                SELECT
-                    a.id as application_id,
-                    a.job_id,
-                    a.user_id,
-                    u.full_name as user_full_name,
-                    u.email as user_email,
-                    a.created_at as applied_at,
-                    a.status,
-                    ROW_NUMBER() OVER (PARTITION BY a.job_id ORDER BY a.created_at DESC) as rn
-                FROM applications a
-                JOIN users u ON a.user_id = u.id
-                WHERE a.job_id = ANY(:job_ids)
-            )
-            SELECT application_id, job_id, user_id, user_full_name, user_email, applied_at, status
-            FROM ranked_applications
-            WHERE rn <= 3
-            ORDER BY job_id, applied_at DESC
-        """)
-
-        recent_result = await db.execute(recent_applicants_query, {"job_ids": job_ids})
-        recent_rows = recent_result.all()
-
-        # Group recent applicants by job_id
-        job_recent_applicants = {}
-        for row in recent_rows:
-            job_id = row.job_id
-            if job_id not in job_recent_applicants:
-                job_recent_applicants[job_id] = []
-
-            # Map backend status to frontend for consistency
-            def map_status_to_frontend(backend_status: str) -> str:
-                status_mapping = {
-                    'HIRED': 'ACCEPTED',
-                    'REJECTED': 'REJECTED',
-                    'SUBMITTED': 'SUBMITTED',
-                    'WAITING_FOR_REVIEW': 'SUBMITTED',
-                    'HR_MEETING': 'SUBMITTED',
-                    'TECHNICAL_INTERVIEW': 'SUBMITTED',
-                    'FINAL_INTERVIEW': 'SUBMITTED'
-                }
-                return status_mapping.get(backend_status, backend_status)
-
-            applicant = RecentApplicant(
-                id=row.application_id,  # Added application id
-                user_id=row.user_id,  # Added user id
-                user_full_name=row.user_full_name,
-                user_email=row.user_email,
-                applied_at=row.applied_at,
-                status=map_status_to_frontend(row.status)
-            )
-            job_recent_applicants[job_id].append(applicant)
-
-        # Add recent applicants to their respective jobs
-        for job in jobs_with_applications:
-            if job.id in job_recent_applicants:
-                job.recent_applicants = job_recent_applicants[job.id]
 
     # Apply "needs_attention" filter if specified (after building all jobs)
     if filter == "needs_attention":

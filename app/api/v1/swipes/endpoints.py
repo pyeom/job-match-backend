@@ -76,6 +76,17 @@ async def create_swipe(
             )
             db.add(application)
             await db.commit()
+            await db.refresh(application)
+
+            # Create notification for the company about new application
+            try:
+                from app.services.notification_service import NotificationService
+                notification_service = NotificationService()
+                await notification_service.create_new_application_notification(db, application.id)
+                await db.commit()
+            except Exception as e:
+                print(f"Failed to create notification for application {application.id}: {e}")
+                # Don't fail the swipe if notification creation fails
 
         # Update user embedding based on right swipe history (as per CLAUDE.md)
         await _update_user_embedding_if_needed(current_user, db)

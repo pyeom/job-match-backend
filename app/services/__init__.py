@@ -4,6 +4,8 @@ from .application_service import ApplicationService
 from .company_service import CompanyService
 from .job_service import JobService
 from .statistics_service import StatisticsService
+from .notification_service import NotificationService
+from .push_notification_service import PushNotificationService
 
 __all__ = [
     "EmbeddingService",
@@ -11,5 +13,7 @@ __all__ = [
     "ApplicationService",
     "CompanyService",
     "JobService",
-    "StatisticsService"
+    "StatisticsService",
+    "NotificationService",
+    "PushNotificationService"
 ]

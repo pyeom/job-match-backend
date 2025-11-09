@@ -189,6 +189,9 @@ class ApplicationService:
                     detail=str(e)
                 )
 
+            # Store old stage for notification
+            old_stage = application.stage
+
             # Update application
             updated_application = await self.application_repo.update(
                 db,
@@ -200,6 +203,20 @@ class ApplicationService:
                 f"Application {application_id} status updated to {backend_status} "
                 f"by user {current_user.id}"
             )
+
+            # Create notification for job seeker about stage/status change
+            try:
+                from app.services.notification_service import NotificationService
+                notification_service = NotificationService()
+                await notification_service.create_application_status_notification(
+                    db,
+                    application_id,
+                    old_stage,
+                    updated_application.stage
+                )
+            except Exception as e:
+                logger.error(f"Failed to create status notification for application {application_id}: {e}")
+                # Don't fail the update if notification creation fails
 
             return updated_application
 
