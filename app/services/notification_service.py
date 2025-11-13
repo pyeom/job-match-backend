@@ -444,9 +444,12 @@ class NotificationService:
             except Exception as push_error:
                 logger.warning(f"Failed to send push notification: {push_error}")
 
+            return notification
+
         except Exception as e:
             # Log but don't raise - notification failures shouldn't block the main operation
             logger.error(f"Failed to create status notification for application {application_id}: {e}")
+            return None
 
     async def create_new_application_notification(
         self,
@@ -538,9 +541,12 @@ class NotificationService:
             except Exception as push_error:
                 logger.warning(f"Failed to send push notification to company: {push_error}")
 
+            return notification
+
         except Exception as e:
             # Log but don't raise - notification failures shouldn't block the main operation
             logger.error(f"Failed to create new application notification for {application_id}: {e}")
+            return None
 
     def _generate_stage_change_message(
         self,

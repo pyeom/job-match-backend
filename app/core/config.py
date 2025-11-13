@@ -30,13 +30,15 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         return f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
     
-    # CORS - allow frontend origins
+    # CORS - allow frontend origins (filter out None values)
     allowed_origins: List[str] = [
-        "http://localhost:3000", 
-        "http://localhost:19006",  # Expo web
-        "http://localhost:8081",   # Expo Metro
-        "exp://localhost:19000",   # Expo development
-        os.getenv("FRONTEND_URL")
+        origin for origin in [
+            "http://localhost:3000",
+            "http://localhost:19006",  # Expo web
+            "http://localhost:8081",   # Expo Metro
+            "exp://localhost:19000",   # Expo development
+            os.getenv("FRONTEND_URL")
+        ] if origin is not None
     ]
     
     class Config:

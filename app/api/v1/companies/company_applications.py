@@ -251,12 +251,53 @@ async def update_application_status(
     if update_data.notes is not None:
         application.notes = update_data.notes
 
+    # Store old stage for notification BEFORE committing
+    old_stage = (
+        application.stage_history[-1]["from_stage"]
+        if stage_changed and application.stage_history
+        else application.stage
+    )
+
     # Update stage_updated_at if stage changed
     if stage_changed:
         application.stage_updated_at = func.now()
 
     await db.commit()
     await db.refresh(application)
+
+    # Create notification for user about status/stage change
+    if stage_changed or update_data.status is not None:
+        try:
+            from app.services.notification_service import NotificationService
+            from app.models.notification import NotificationType
+            import logging
+
+            logger = logging.getLogger(__name__)
+            notification_service = NotificationService()
+
+            # Determine notification type based on new status/stage
+            if application.status == "REJECTED":
+                notification_type = NotificationType.APPLICATION_REJECTED
+            elif application.status == "HIRED":
+                notification_type = NotificationType.APPLICATION_ACCEPTED
+            else:
+                notification_type = NotificationType.APPLICATION_UPDATE
+
+            # Create notification
+            await notification_service.create_application_status_notification(
+                db=db,
+                application_id=application.id,
+                old_stage=old_stage,
+                new_stage=application.stage
+            )
+            await db.commit()
+
+            logger.info(f"Created status notification for application {application.id}")
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to create status notification for application {application.id}: {e}")
+            # Don't fail the request if notification fails
 
     # Return new format (no more status mapping)
     return ApplicationWithUserResponse(
