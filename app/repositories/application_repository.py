@@ -39,6 +39,44 @@ class ApplicationRepository(BaseRepository[Application]):
         """Initialize with Application model."""
         super().__init__(Application)
 
+    async def get(
+        self,
+        db: AsyncSession,
+        id: UUID
+    ) -> Optional[Application]:
+        """
+        Get application by ID with relationships loaded.
+
+        This override loads the user and job relationships needed for notifications.
+
+        Args:
+            db: Active database session
+            id: UUID of the application
+
+        Returns:
+            Application instance with relationships loaded, or None if not found
+
+        Example:
+            app = await repo.get(db, application_id)
+            if app:
+                print(f"{app.user.email} applied to {app.job.title} at {app.job.company.name}")
+        """
+        try:
+            stmt = (
+                select(Application)
+                .where(Application.id == id)
+                .options(
+                    selectinload(Application.user),
+                    selectinload(Application.job).selectinload(Job.company)
+                )
+            )
+            result = await db.execute(stmt)
+            return result.scalar_one_or_none()
+
+        except SQLAlchemyError as e:
+            logger.error(f"Error fetching application {id} with relationships: {e}")
+            raise
+
     async def get_applications_for_job(
         self,
         db: AsyncSession,

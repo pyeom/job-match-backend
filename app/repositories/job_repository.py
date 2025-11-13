@@ -36,6 +36,41 @@ class JobRepository(BaseRepository[Job]):
         """Initialize with Job model."""
         super().__init__(Job)
 
+    async def get(
+        self,
+        db: AsyncSession,
+        id: UUID
+    ) -> Optional[Job]:
+        """
+        Get job by ID with company relationship loaded.
+
+        This override loads the company relationship needed for notifications.
+
+        Args:
+            db: Active database session
+            id: UUID of the job
+
+        Returns:
+            Job instance with company loaded, or None if not found
+
+        Example:
+            job = await repo.get(db, job_id)
+            if job:
+                print(f"{job.title} at {job.company.name}")
+        """
+        try:
+            stmt = (
+                select(Job)
+                .where(Job.id == id)
+                .options(selectinload(Job.company))
+            )
+            result = await db.execute(stmt)
+            return result.scalar_one_or_none()
+
+        except SQLAlchemyError as e:
+            logger.error(f"Error fetching job {id} with company: {e}")
+            raise
+
     async def get_company_jobs(
         self,
         db: AsyncSession,
