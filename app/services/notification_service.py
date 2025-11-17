@@ -374,17 +374,30 @@ class NotificationService:
             await db.commit()
         """
         try:
+            logger.info(f"Creating status change notification for application {application_id}: {old_stage} -> {new_stage}")
+
             # Get application with related data
             application = await self.application_repo.get(db, application_id)
             if not application:
-                logger.warning(f"Cannot create notification: Application {application_id} not found")
-                return
+                logger.error(f"Cannot create notification: Application {application_id} not found in database")
+                return None
+
+            logger.debug(f"Application {application_id} found: user_id={application.user_id}, job_id={application.job_id}")
 
             # Get job details
             job = await self.job_repo.get(db, application.job_id)
             if not job:
-                logger.warning(f"Cannot create notification: Job {application.job_id} not found")
-                return
+                logger.error(f"Cannot create notification: Job {application.job_id} not found in database")
+                return None
+
+            logger.debug(f"Job {job.id} found: title={job.title}, company_id={job.company_id}")
+
+            # Verify company relationship is loaded
+            if not job.company:
+                logger.error(f"Cannot create notification: Job {job.id} has no company relationship loaded")
+                return None
+
+            logger.debug(f"Company relationship loaded: company_id={job.company_id}, name={job.company.name}")
 
             # Generate notification message based on stage transition
             message = self._generate_stage_change_message(job.title, job.company.name, old_stage, new_stage)
@@ -400,30 +413,38 @@ class NotificationService:
                 "is_read": False
             }
 
+            logger.debug(f"Creating notification with data: {notification_data}")
+
             notification = await self.notification_repo.create_notification(db, notification_data)
-            logger.info(f"Created status update notification for application {application_id}")
+
+            logger.info(f"Successfully created notification {notification.id} for user {application.user_id} about application {application_id} status change")
 
             # Send real-time WebSocket notification
             try:
+                logger.info(f"[NotificationService] Preparing to send WebSocket notification to user {application.user_id}")
+                ws_payload = {
+                    "type": "notification",
+                    "data": {
+                        "id": str(notification.id),
+                        "user_id": str(application.user_id),
+                        "title": notification_data["title"],
+                        "message": notification_data["message"],
+                        "type": notification_data["type"].value,  # Changed from notification_type to type
+                        "job_id": str(job.id) if job else None,
+                        "application_id": str(application.id),
+                        "created_at": notification.created_at.isoformat(),
+                        "is_read": False
+                    }
+                }
+                logger.debug(f"[NotificationService] WebSocket payload: {ws_payload}")
+
                 await connection_manager.send_to_user(
                     application.user_id,
-                    {
-                        "type": "notification",
-                        "data": {
-                            "id": str(notification.id),
-                            "title": notification_data["title"],
-                            "message": notification_data["message"],
-                            "notification_type": notification_data["type"].value,
-                            "job_id": str(job.id) if job else None,
-                            "application_id": str(application.id),
-                            "created_at": notification.created_at.isoformat(),
-                            "is_read": False
-                        }
-                    }
+                    ws_payload
                 )
-                logger.debug(f"Sent WebSocket notification to user {application.user_id}")
+                logger.info(f"[NotificationService] WebSocket notification sent successfully to user {application.user_id}")
             except Exception as ws_error:
-                logger.warning(f"Failed to send WebSocket notification: {ws_error}")
+                logger.error(f"[NotificationService] Failed to send WebSocket notification to user {application.user_id}: {ws_error}", exc_info=True)
 
             # Send push notification
             try:
@@ -448,7 +469,7 @@ class NotificationService:
 
         except Exception as e:
             # Log but don't raise - notification failures shouldn't block the main operation
-            logger.error(f"Failed to create status notification for application {application_id}: {e}")
+            logger.error(f"Failed to create status notification for application {application_id}: {e}", exc_info=True)
             return None
 
     async def create_new_application_notification(
@@ -471,17 +492,37 @@ class NotificationService:
             await db.commit()
         """
         try:
-            # Get application with related data
+            logger.info(f"Creating new application notification for application {application_id}")
+
+            # Get application with related data - the repo loads user and job relationships
             application = await self.application_repo.get(db, application_id)
             if not application:
-                logger.warning(f"Cannot create notification: Application {application_id} not found")
-                return
+                logger.error(f"Cannot create notification: Application {application_id} not found in database")
+                return None
+
+            logger.debug(f"Application {application_id} found: user_id={application.user_id}, job_id={application.job_id}")
+
+            # Verify user relationship is loaded
+            if not application.user:
+                logger.error(f"Cannot create notification: Application {application_id} has no user relationship loaded")
+                return None
+
+            logger.debug(f"User relationship loaded: email={application.user.email}, full_name={application.user.full_name}")
 
             # Get job and user details
             job = await self.job_repo.get(db, application.job_id)
             if not job:
-                logger.warning(f"Cannot create notification: Job {application.job_id} not found")
-                return
+                logger.error(f"Cannot create notification: Job {application.job_id} not found in database")
+                return None
+
+            logger.debug(f"Job {job.id} found: title={job.title}, company_id={job.company_id}")
+
+            # Verify company relationship is loaded
+            if not job.company:
+                logger.error(f"Cannot create notification: Job {job.id} has no company relationship loaded")
+                return None
+
+            logger.debug(f"Company relationship loaded: company_id={job.company_id}, name={job.company.name}")
 
             # Create notification for the company
             applicant_name = application.user.full_name or application.user.email
@@ -497,30 +538,38 @@ class NotificationService:
                 "is_read": False
             }
 
+            logger.debug(f"Creating notification with data: {notification_data}")
+
             notification = await self.notification_repo.create_notification(db, notification_data)
-            logger.info(f"Created new application notification for job {job.id}")
+
+            logger.info(f"Successfully created notification {notification.id} for company {job.company_id} about application {application_id}")
 
             # Send real-time WebSocket notification to company
             try:
+                logger.info(f"[NotificationService] Preparing to send WebSocket notification to company {job.company_id}")
+                ws_payload = {
+                    "type": "notification",
+                    "data": {
+                        "id": str(notification.id),
+                        "company_id": str(job.company_id),
+                        "title": notification_data["title"],
+                        "message": notification_data["message"],
+                        "type": notification_data["type"].value,  # Changed from notification_type to type
+                        "job_id": str(job.id),
+                        "application_id": str(application.id),
+                        "created_at": notification.created_at.isoformat(),
+                        "is_read": False
+                    }
+                }
+                logger.debug(f"[NotificationService] WebSocket payload for company: {ws_payload}")
+
                 await connection_manager.send_to_company(
                     job.company_id,
-                    {
-                        "type": "notification",
-                        "data": {
-                            "id": str(notification.id),
-                            "title": notification_data["title"],
-                            "message": notification_data["message"],
-                            "notification_type": notification_data["type"].value,
-                            "job_id": str(job.id),
-                            "application_id": str(application.id),
-                            "created_at": notification.created_at.isoformat(),
-                            "is_read": False
-                        }
-                    }
+                    ws_payload
                 )
-                logger.debug(f"Sent WebSocket notification to company {job.company_id}")
+                logger.info(f"[NotificationService] WebSocket notification sent successfully to company {job.company_id}")
             except Exception as ws_error:
-                logger.warning(f"Failed to send WebSocket notification to company: {ws_error}")
+                logger.error(f"[NotificationService] Failed to send WebSocket notification to company {job.company_id}: {ws_error}", exc_info=True)
 
             # Send push notification to company
             try:
@@ -545,7 +594,7 @@ class NotificationService:
 
         except Exception as e:
             # Log but don't raise - notification failures shouldn't block the main operation
-            logger.error(f"Failed to create new application notification for {application_id}: {e}")
+            logger.error(f"Failed to create new application notification for {application_id}: {e}", exc_info=True)
             return None
 
     def _generate_stage_change_message(

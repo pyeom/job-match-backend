@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, validator
+from pydantic import BaseModel, EmailStr, validator, field_validator
 from typing import Optional, Union
 import uuid
 from app.models.user import UserRole
@@ -22,14 +22,21 @@ class UserLogin(BaseModel):
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
-    full_name: Optional[str] = None
+    full_name: str
     role: UserRole = UserRole.JOB_SEEKER
+
+    @field_validator('full_name')
+    @classmethod
+    def full_name_must_not_be_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Full name is required and cannot be empty')
+        return v.strip()
 
 
 class CompanyUserCreate(BaseModel):
     """
     Schema for creating company users with role validation and mapping.
-    
+
     Role Mapping:
     - 'admin' → COMPANY_ADMIN: Full access to company settings, jobs, and team management
     - 'recruiter' → COMPANY_RECRUITER: Can post jobs, review applications, manage hiring
@@ -37,7 +44,7 @@ class CompanyUserCreate(BaseModel):
     """
     email: EmailStr
     password: str
-    full_name: Optional[str] = None
+    full_name: str
     role: Union[UserRole, str]  # Accept both enum and string values from frontend
     company_name: str
     company_description: Optional[str] = None
@@ -45,7 +52,14 @@ class CompanyUserCreate(BaseModel):
     company_industry: Optional[str] = None
     company_size: Optional[str] = None
     company_location: Optional[str] = None
-    
+
+    @field_validator('full_name')
+    @classmethod
+    def full_name_must_not_be_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Full name is required and cannot be empty')
+        return v.strip()
+
     @validator('role')
     def role_must_be_company_role(cls, v):
         """

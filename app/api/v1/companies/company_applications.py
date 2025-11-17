@@ -59,7 +59,7 @@ def validate_stage_transition(current_stage: str, new_stage: str) -> bool:
 router = APIRouter()
 
 
-@router.get("/{company_id}/jobs/{job_id}/applications", response_model=PaginatedResponse[ApplicationWithDetails])
+@router.get("/{company_id}/jobs/{job_id}/applications", response_model=PaginatedResponse[ApplicationWithUserResponse])
 async def get_job_applications(
     company_id: uuid.UUID,
     job_id: uuid.UUID,
@@ -116,50 +116,29 @@ async def get_job_applications(
     result = await db.execute(paginated_query)
     rows = result.all()
 
-    # Transform to response format
-    applications_with_details = []
+    # Transform to flattened response format (ApplicationWithUserResponse)
+    applications_with_user_response = []
     for app, user, job_info, company in rows:
-        user_info = UserBasicInfo(
-            id=user.id,
-            email=user.email,
-            full_name=user.full_name,
-            skills=user.skills,
-            seniority=user.seniority,
-            location=user.preferred_locations[0] if user.preferred_locations else None
+        flattened_app = ApplicationWithUserResponse(
+            id=app.id,
+            job_id=app.job_id,
+            job_title=job_info.title,
+            user_id=app.user_id,
+            user_email=user.email,
+            user_full_name=user.full_name,
+            user_headline=user.headline,
+            user_skills=user.skills,
+            stage=app.stage,
+            status=app.status,
+            stage_updated_at=app.stage_updated_at,
+            rejection_reason=app.rejection_reason,
+            created_at=app.created_at,
+            updated_at=app.updated_at or app.created_at
         )
-
-        company_details = CompanyDetails(
-            id=company.id,
-            name=company.name,
-            logo_url=company.logo_url,
-            location=company.location,
-            size=company.size,
-            industry=company.industry
-        )
-
-        job_details = JobDetails(
-            id=job_info.id,
-            title=job_info.title,
-            location=job_info.location,
-            seniority=job_info.seniority,
-            short_description=job_info.short_description,
-            description=job_info.description,
-            tags=job_info.tags,
-            salary_min=job_info.salary_min,
-            salary_max=job_info.salary_max,
-            remote=job_info.remote,
-            created_at=job_info.created_at,
-            company=company_details
-        )
-
-        app_dict = ApplicationWithDetails.from_orm(app).dict()
-        app_dict["user"] = user_info
-        app_dict["job"] = job_details
-
-        applications_with_details.append(ApplicationWithDetails(**app_dict))
+        applications_with_user_response.append(flattened_app)
 
     return PaginatedResponse(
-        items=applications_with_details,
+        items=applications_with_user_response,
         total=total,
         page=page,
         limit=limit
@@ -275,6 +254,8 @@ async def update_application_status(
             logger = logging.getLogger(__name__)
             notification_service = NotificationService()
 
+            logger.info(f"Stage or status changed for application {application.id}. Stage changed: {stage_changed}, New status: {update_data.status}")
+
             # Determine notification type based on new status/stage
             if application.status == "REJECTED":
                 notification_type = NotificationType.APPLICATION_REJECTED
@@ -283,21 +264,31 @@ async def update_application_status(
             else:
                 notification_type = NotificationType.APPLICATION_UPDATE
 
+            logger.debug(f"Notification type determined: {notification_type}")
+
             # Create notification
-            await notification_service.create_application_status_notification(
+            logger.info(f"Attempting to create status notification for application {application.id}: {old_stage} -> {application.stage}")
+
+            notification = await notification_service.create_application_status_notification(
                 db=db,
                 application_id=application.id,
                 old_stage=old_stage,
                 new_stage=application.stage
             )
-            await db.commit()
 
-            logger.info(f"Created status notification for application {application.id}")
+            if notification:
+                await db.commit()
+                logger.info(f"Successfully created status notification {notification.id} for application {application.id}")
+            else:
+                logger.warning(f"Notification service returned None for application {application.id}")
+
         except Exception as e:
             import logging
             logger = logging.getLogger(__name__)
-            logger.error(f"Failed to create status notification for application {application.id}: {e}")
+            logger.error(f"Failed to create status notification for application {application.id}: {e}", exc_info=True)
             # Don't fail the request if notification fails
+            # Rollback only the notification transaction, not the application update
+            await db.rollback()
 
     # Return new format (no more status mapping)
     return ApplicationWithUserResponse(
