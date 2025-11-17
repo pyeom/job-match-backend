@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, computed_field
+from pydantic import BaseModel, EmailStr, computed_field, field_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import uuid
@@ -50,6 +50,14 @@ class UserUpdate(BaseModel):
     seniority: Optional[str] = None
     experience: Optional[List[Dict[str, Any]]] = None
     education: Optional[List[Dict[str, Any]]] = None
+
+    @field_validator('full_name')
+    @classmethod
+    def full_name_must_not_be_empty_if_provided(cls, v):
+        """If full_name is provided, it must not be empty or just whitespace"""
+        if v is not None and (not v or not v.strip()):
+            raise ValueError('Full name cannot be empty or just whitespace')
+        return v.strip() if v else v
 
 
 class UserInDB(UserBase):

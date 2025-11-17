@@ -48,42 +48,52 @@ async def authenticate_websocket(token: str, db: AsyncSession) -> Optional[tuple
                 owner_type, owner_id = auth_result
     """
     try:
+        logger.info("[WS Auth] Starting WebSocket authentication")
+
         # Decode JWT token
         payload = decode_token(token)
         if not payload:
-            logger.debug("WebSocket auth failed: Invalid token")
+            logger.warning("[WS Auth] ❌ Invalid token - decode_token returned None")
             return None
+
+        logger.debug(f"[WS Auth] Token payload: {payload}")
 
         subject = payload.get("sub")
         if not subject:
-            logger.debug("WebSocket auth failed: No subject in token")
+            logger.warning("[WS Auth] ❌ No subject in token payload")
             return None
+
+        logger.info(f"[WS Auth] Token subject (user_id): {subject}")
 
         # Convert subject to UUID
         try:
             user_uuid = UUID(subject)
-        except (ValueError, TypeError):
-            logger.debug(f"WebSocket auth failed: Invalid UUID format: {subject}")
+            logger.debug(f"[WS Auth] Parsed UUID: {user_uuid}")
+        except (ValueError, TypeError) as e:
+            logger.warning(f"[WS Auth] ❌ Invalid UUID format: {subject}, error: {e}")
             return None
 
         # Check if it's a user (try to get user by ID)
+        logger.debug(f"[WS Auth] Querying database for user {user_uuid}")
         result = await db.execute(select(User).where(User.id == user_uuid))
         user = result.scalar_one_or_none()
 
         if not user:
-            logger.debug(f"WebSocket auth failed: User not found: {user_uuid}")
+            logger.warning(f"[WS Auth] ❌ User not found in database: {user_uuid}")
             return None
+
+        logger.info(f"[WS Auth] ✅ Found user: {user.id}, email: {user.email}, has company_id: {user.company_id is not None}")
 
         # If user has a company_id, they're a company user
         if user.company_id:
-            logger.debug(f"Authenticated company user: {user.company_id}")
+            logger.info(f"[WS Auth] ✅ Authenticated as COMPANY user - company_id: {user.company_id}")
             return ("company", user.company_id)
 
-        logger.debug(f"Authenticated regular user: {user.id}")
+        logger.info(f"[WS Auth] ✅ Authenticated as REGULAR user - user_id: {user.id}")
         return ("user", user.id)
 
     except Exception as e:
-        logger.error(f"WebSocket authentication error: {e}", exc_info=True)
+        logger.error(f"[WS Auth] ❌ WebSocket authentication error: {e}", exc_info=True)
         return None
 
 
@@ -166,9 +176,13 @@ async def websocket_endpoint(websocket: WebSocket):
 
         owner_type, owner_id = auth_result
 
+        logger.info(f"[WS Endpoint] About to register connection - type: {owner_type}, id: {owner_id}")
+
         # Register connection
         await connection_manager.connect(websocket, owner_type, owner_id)
         authenticated = True
+
+        logger.info(f"[WS Endpoint] Connection registered successfully")
 
         # Send authentication success
         await websocket.send_json({
@@ -177,7 +191,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "message": "Successfully authenticated"
         })
 
-        logger.info(f"WebSocket authenticated: {owner_type}={owner_id}")
+        logger.info(f"[WS Endpoint] ✅ WebSocket authenticated and registered: {owner_type}={owner_id}")
 
         # Start heartbeat task
         heartbeat_task = asyncio.create_task(send_heartbeat(websocket))

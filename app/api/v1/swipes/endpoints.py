@@ -14,6 +14,9 @@ from app.schemas.job import JobWithCompany
 import base64
 import json
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -78,15 +81,27 @@ async def create_swipe(
             await db.commit()
             await db.refresh(application)
 
+            logger.info(f"Created new application {application.id} for user {current_user.id} on job {swipe_data.job_id}")
+
             # Create notification for the company about new application
             try:
                 from app.services.notification_service import NotificationService
+
+                logger.info(f"Attempting to create notification for application {application.id}")
                 notification_service = NotificationService()
-                await notification_service.create_new_application_notification(db, application.id)
-                await db.commit()
+                notification = await notification_service.create_new_application_notification(db, application.id)
+
+                if notification:
+                    await db.commit()
+                    logger.info(f"Successfully created notification {notification.id} for application {application.id}")
+                else:
+                    logger.warning(f"Notification service returned None for application {application.id}")
+
             except Exception as e:
-                print(f"Failed to create notification for application {application.id}: {e}")
+                logger.error(f"Failed to create notification for application {application.id}: {e}", exc_info=True)
                 # Don't fail the swipe if notification creation fails
+                # Rollback only the notification transaction, not the application
+                await db.rollback()
 
         # Update user embedding based on right swipe history (as per CLAUDE.md)
         await _update_user_embedding_if_needed(current_user, db)

@@ -45,26 +45,35 @@ class ConnectionManager:
         """
         Register a new WebSocket connection.
 
+        NOTE: websocket.accept() should be called BEFORE this method
+        in the endpoint handler, not here.
+
         Args:
-            websocket: WebSocket instance
+            websocket: WebSocket instance (already accepted)
             owner_type: "user" or "company"
             owner_id: UUID of user or company
         """
-        await websocket.accept()
+        logger.info(f"[ConnectionManager] Registering connection - type: {owner_type}, id: {owner_id}")
 
         if owner_type == "user":
             if owner_id not in self.user_connections:
                 self.user_connections[owner_id] = set()
+                logger.debug(f"[ConnectionManager] Created new user connection set for user {owner_id}")
             self.user_connections[owner_id].add(websocket)
+            logger.info(f"[ConnectionManager] ✅ Added websocket to user_connections[{owner_id}] - total connections: {len(self.user_connections[owner_id])}")
         elif owner_type == "company":
             if owner_id not in self.company_connections:
                 self.company_connections[owner_id] = set()
+                logger.debug(f"[ConnectionManager] Created new company connection set for company {owner_id}")
             self.company_connections[owner_id].add(websocket)
+            logger.info(f"[ConnectionManager] ✅ Added websocket to company_connections[{owner_id}] - total connections: {len(self.company_connections[owner_id])}")
 
         self.connection_owners[websocket] = (owner_type, owner_id)
         self.last_pong[websocket] = datetime.utcnow()
 
-        logger.info(f"WebSocket connected: {owner_type}={owner_id}")
+        # Summary log
+        logger.info(f"[ConnectionManager] ✅✅✅ WebSocket registered successfully: {owner_type}={owner_id}")
+        logger.info(f"[ConnectionManager] Total users connected: {len(self.user_connections)}, Total companies connected: {len(self.company_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         """
@@ -74,24 +83,34 @@ class ConnectionManager:
             websocket: WebSocket instance to remove
         """
         if websocket not in self.connection_owners:
+            logger.debug("[ConnectionManager] Disconnect called for untracked websocket")
             return
 
         owner_type, owner_id = self.connection_owners[websocket]
 
+        logger.info(f"[ConnectionManager] Disconnecting {owner_type}={owner_id}")
+
         if owner_type == "user" and owner_id in self.user_connections:
             self.user_connections[owner_id].discard(websocket)
+            remaining = len(self.user_connections[owner_id])
+            logger.info(f"[ConnectionManager] Removed websocket from user_connections[{owner_id}] - remaining connections: {remaining}")
             if not self.user_connections[owner_id]:
                 del self.user_connections[owner_id]
+                logger.info(f"[ConnectionManager] Removed user {owner_id} from user_connections (no more connections)")
 
         elif owner_type == "company" and owner_id in self.company_connections:
             self.company_connections[owner_id].discard(websocket)
+            remaining = len(self.company_connections[owner_id])
+            logger.info(f"[ConnectionManager] Removed websocket from company_connections[{owner_id}] - remaining connections: {remaining}")
             if not self.company_connections[owner_id]:
                 del self.company_connections[owner_id]
+                logger.info(f"[ConnectionManager] Removed company {owner_id} from company_connections (no more connections)")
 
         del self.connection_owners[websocket]
         self.last_pong.pop(websocket, None)
 
-        logger.info(f"WebSocket disconnected: {owner_type}={owner_id}")
+        logger.info(f"[ConnectionManager] ✅ WebSocket disconnected: {owner_type}={owner_id}")
+        logger.info(f"[ConnectionManager] Total users connected: {len(self.user_connections)}, Total companies connected: {len(self.company_connections)}")
 
     async def send_to_user(self, user_id: UUID, message: dict):
         """
@@ -101,22 +120,31 @@ class ConnectionManager:
             user_id: UUID of the user
             message: Dictionary to send as JSON
         """
+        logger.info(f"[WebSocketManager] Attempting to send message to user {user_id}")
+        logger.info(f"[WebSocketManager] Total users with connections: {len(self.user_connections)}")
+        logger.info(f"[WebSocketManager] User IDs with connections: {list(self.user_connections.keys())}")
+
         if user_id not in self.user_connections:
-            logger.debug(f"No active connections for user {user_id}")
+            logger.warning(f"[WebSocketManager] No active connections for user {user_id}")
+            logger.info(f"[WebSocketManager] Message type: {message.get('type')}, will not be delivered in real-time")
             return
 
         connections = self.user_connections[user_id].copy()
+        logger.info(f"[WebSocketManager] Found {len(connections)} active connection(s) for user {user_id}")
         disconnected = []
 
         for websocket in connections:
             try:
+                logger.debug(f"[WebSocketManager] Sending message to user {user_id} via WebSocket")
                 await websocket.send_json(message)
+                logger.info(f"[WebSocketManager] Successfully sent message to user {user_id}")
             except Exception as e:
-                logger.error(f"Error sending to user {user_id}: {e}")
+                logger.error(f"[WebSocketManager] Error sending to user {user_id}: {e}", exc_info=True)
                 disconnected.append(websocket)
 
         # Clean up failed connections
         for ws in disconnected:
+            logger.warning(f"[WebSocketManager] Removing failed connection for user {user_id}")
             self.disconnect(ws)
 
     async def send_to_company(self, company_id: UUID, message: dict):
