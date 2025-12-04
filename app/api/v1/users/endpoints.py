@@ -4,6 +4,7 @@ from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.schemas.user import User as UserSchema, UserUpdate
+from app.services.embedding_service import embedding_service
 import uuid
 
 router = APIRouter()
@@ -34,6 +35,19 @@ async def update_current_user_legacy(
 
     for field, value in update_data.items():
         setattr(current_user, field, value)
+
+    # Recalculate embedding if profile fields changed
+    if any(field in update_data for field in ['headline', 'skills', 'preferred_locations', 'seniority']):
+        try:
+            profile_embedding = embedding_service.generate_user_embedding(
+                headline=current_user.headline,
+                skills=current_user.skills,
+                preferences=current_user.preferred_locations
+            )
+            current_user.profile_embedding = profile_embedding
+        except Exception as e:
+            # Log error but don't fail update
+            print(f"Failed to regenerate profile embedding for user {current_user.id}: {e}")
 
     await db.commit()
     await db.refresh(current_user)
@@ -78,6 +92,19 @@ async def update_user_profile(
 
     for field, value in update_data.items():
         setattr(current_user, field, value)
+
+    # Recalculate embedding if profile fields changed
+    if any(field in update_data for field in ['headline', 'skills', 'preferred_locations', 'seniority']):
+        try:
+            profile_embedding = embedding_service.generate_user_embedding(
+                headline=current_user.headline,
+                skills=current_user.skills,
+                preferences=current_user.preferred_locations
+            )
+            current_user.profile_embedding = profile_embedding
+        except Exception as e:
+            # Log error but don't fail update
+            print(f"Failed to regenerate profile embedding for user {current_user.id}: {e}")
 
     await db.commit()
     await db.refresh(current_user)

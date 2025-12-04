@@ -14,6 +14,7 @@ from app.schemas.auth import (
 )
 from app.schemas.user import User as UserSchema
 from app.api.deps import get_current_user
+from app.services.embedding_service import embedding_service
 import uuid
 
 router = APIRouter()
@@ -42,6 +43,20 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     )
 
     db.add(db_user)
+    await db.flush()  # Get the user ID before generating embedding
+
+    # Generate initial profile embedding (will be zero vector if no profile data yet)
+    try:
+        profile_embedding = embedding_service.generate_user_embedding(
+            headline=db_user.headline,
+            skills=db_user.skills,
+            preferences=db_user.preferred_locations
+        )
+        db_user.profile_embedding = profile_embedding
+    except Exception as e:
+        # Log error but don't fail registration
+        print(f"Failed to generate profile embedding for user {db_user.id}: {e}")
+
     await db.commit()
     await db.refresh(db_user)
 
@@ -107,6 +122,20 @@ async def register_company_user(user_data: CompanyUserCreate, db: AsyncSession =
     )
 
     db.add(db_user)
+    await db.flush()  # Get the user ID before generating embedding
+
+    # Generate initial profile embedding (company users may not need it, but good to have)
+    try:
+        profile_embedding = embedding_service.generate_user_embedding(
+            headline=db_user.headline,
+            skills=db_user.skills,
+            preferences=db_user.preferred_locations
+        )
+        db_user.profile_embedding = profile_embedding
+    except Exception as e:
+        # Log error but don't fail registration
+        print(f"Failed to generate profile embedding for user {db_user.id}: {e}")
+
     await db.commit()
     await db.refresh(db_user)
 
