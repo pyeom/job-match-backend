@@ -93,7 +93,7 @@ async def discover_jobs(
 
         # Use vector similarity ordering
         stmt = base_query.order_by(
-            current_user.profile_embedding.cosine_distance(Job.job_embedding)
+            Job.job_embedding.cosine_distance(current_user.profile_embedding)
         ).limit(candidate_limit)
 
         result = await db.execute(stmt)
@@ -102,7 +102,7 @@ async def discover_jobs(
         # Re-rank using ML scoring
         scored_jobs = []
         for job in candidate_jobs:
-            if job.job_embedding:  # Only score jobs with embeddings
+            if job.job_embedding is not None:  # Only score jobs with embeddings
                 try:
                     score = scoring_service.calculate_job_score(
                         user_embedding=current_user.profile_embedding,
