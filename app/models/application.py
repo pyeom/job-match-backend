@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, Integer
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -32,6 +32,7 @@ class Application(Base):
     # Optional fields
     cover_letter = Column(Text)
     notes = Column(Text)  # Internal notes for tracking
+    score = Column(Integer, nullable=True)  # Match score (0-100) at time of application
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

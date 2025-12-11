@@ -23,6 +23,9 @@ from app.schemas.application import (
 )
 from pydantic import BaseModel
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # Stage transition validation
@@ -106,18 +109,12 @@ async def get_job_applications(
     if status_filter:
         base_query = base_query.where(Application.status == status_filter)
 
-    # Get total count
-    count_query = select(func.count()).select_from(base_query.subquery())
-    count_result = await db.execute(count_query)
-    total = count_result.scalar() or 0
-
-    # Get paginated results
-    paginated_query = base_query.order_by(desc(Application.created_at)).offset(offset).limit(limit)
-    result = await db.execute(paginated_query)
+    # Get all results (we need to sort by score before pagination)
+    result = await db.execute(base_query)
     rows = result.all()
 
-    # Transform to flattened response format (ApplicationWithUserResponse)
-    applications_with_user_response = []
+    # Transform to response format
+    applications_with_scores = []
     for app, user, job_info, company in rows:
         flattened_app = ApplicationWithUserResponse(
             id=app.id,
@@ -128,14 +125,23 @@ async def get_job_applications(
             user_full_name=user.full_name,
             user_headline=user.headline,
             user_skills=user.skills,
+            user_seniority=user.seniority,
             stage=app.stage,
             status=app.status,
             stage_updated_at=app.stage_updated_at,
             rejection_reason=app.rejection_reason,
             created_at=app.created_at,
-            updated_at=app.updated_at or app.created_at
+            updated_at=app.updated_at or app.created_at,
+            score=app.score  # Use stored score from application
         )
-        applications_with_user_response.append(flattened_app)
+        applications_with_scores.append(flattened_app)
+
+    # Sort by score (DESC) then by created_at (DESC) for ties
+    applications_with_scores.sort(key=lambda x: (-(x.score or 0), -x.created_at.timestamp()))
+
+    # Apply pagination after sorting
+    total = len(applications_with_scores)
+    applications_with_user_response = applications_with_scores[offset:offset + limit]
 
     return PaginatedResponse(
         items=applications_with_user_response,
@@ -300,12 +306,14 @@ async def update_application_status(
         user_full_name=user.full_name,
         user_headline=user.headline,
         user_skills=user.skills,
+        user_seniority=user.seniority,
         stage=application.stage,
         status=application.status,
         stage_updated_at=application.stage_updated_at,
         rejection_reason=application.rejection_reason,
         created_at=application.created_at,
-        updated_at=application.updated_at or application.created_at
+        updated_at=application.updated_at or application.created_at,
+        score=application.score  # Use stored score from application
     )
 
 
@@ -358,18 +366,12 @@ async def get_all_company_applications(
     if created_before:
         base_query = base_query.where(Application.created_at <= created_before)
 
-    # Get total count
-    count_query = select(func.count()).select_from(base_query.subquery())
-    count_result = await db.execute(count_query)
-    total = count_result.scalar() or 0
-
-    # Get paginated results
-    paginated_query = base_query.order_by(desc(Application.created_at)).offset(offset).limit(limit)
-    result = await db.execute(paginated_query)
+    # Get all results (we need to sort by score before pagination)
+    result = await db.execute(base_query)
     rows = result.all()
 
-    # Transform to flattened response format - NO MORE STATUS MAPPING
-    applications_with_user_response = []
+    # Transform to response format
+    applications_with_scores = []
     for app, user, job in rows:
         flattened_app = ApplicationWithUserResponse(
             id=app.id,
@@ -380,14 +382,23 @@ async def get_all_company_applications(
             user_full_name=user.full_name,
             user_headline=user.headline,
             user_skills=user.skills,
-            stage=app.stage,  # NEW: Direct stage
-            status=app.status,  # NEW: Direct status
-            stage_updated_at=app.stage_updated_at,  # NEW
-            rejection_reason=app.rejection_reason,  # NEW
+            user_seniority=user.seniority,
+            stage=app.stage,
+            status=app.status,
+            stage_updated_at=app.stage_updated_at,
+            rejection_reason=app.rejection_reason,
             created_at=app.created_at,
-            updated_at=app.updated_at or app.created_at
+            updated_at=app.updated_at or app.created_at,
+            score=app.score  # Use stored score from application
         )
-        applications_with_user_response.append(flattened_app)
+        applications_with_scores.append(flattened_app)
+
+    # Sort by score (DESC) then by created_at (DESC) for ties
+    applications_with_scores.sort(key=lambda x: (-(x.score or 0), -x.created_at.timestamp()))
+
+    # Apply pagination after sorting
+    total = len(applications_with_scores)
+    applications_with_user_response = applications_with_scores[offset:offset + limit]
 
     return PaginatedResponse(
         items=applications_with_user_response,

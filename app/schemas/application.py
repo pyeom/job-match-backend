@@ -136,12 +136,14 @@ class ApplicationWithUserResponse(BaseModel):
     user_full_name: Optional[str] = None
     user_headline: Optional[str] = None
     user_skills: Optional[List[str]] = None
+    user_seniority: Optional[str] = None
     stage: ApplicationStage
     status: ApplicationStatus
     stage_updated_at: datetime
     rejection_reason: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    score: Optional[int] = None  # Match score (0-100)
 
     class Config:
         from_attributes = True

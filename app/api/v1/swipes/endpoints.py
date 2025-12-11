@@ -72,10 +72,15 @@ async def create_swipe(
         existing_application = result.scalar_one_or_none()
 
         if not existing_application:
+            # Use score from discover feed (already calculated and sent to frontend)
+            score = swipe_data.score
+            logger.info(f"Saving application with score {score} for user {current_user.id} on job {job.id}")
+
             application = Application(
                 user_id=current_user.id,
                 job_id=swipe_data.job_id,
-                status="ACTIVE"
+                status="ACTIVE",
+                score=score
             )
             db.add(application)
             await db.commit()
