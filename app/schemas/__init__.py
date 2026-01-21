@@ -4,6 +4,11 @@ from .job import Job, JobBase, JobCreate, JobUpdate, JobInDB
 from .swipe import Swipe, SwipeCreate
 from .application import Application, ApplicationCreate, ApplicationUpdate
 from .push_token import PushTokenCreate, PushTokenResponse, PushTokenDeleteResponse
+from .search import (
+    JobSearchRequest, JobSearchResponse, FilterPreset, FilterPresetCreate,
+    FilterPresetUpdate, RecentSearch, RecentSearchCreate, SortField, SortOrder,
+    WorkArrangement, SeniorityLevel, JobType
+)
 from .statistics import (
     JobApplicationStats,
     CompanyApplicationMetrics,
@@ -29,6 +34,9 @@ __all__ = [
     "Swipe", "SwipeCreate",
     "Application", "ApplicationCreate", "ApplicationUpdate",
     "PushTokenCreate", "PushTokenResponse", "PushTokenDeleteResponse",
+    "JobSearchRequest", "JobSearchResponse", "FilterPreset", "FilterPresetCreate",
+    "FilterPresetUpdate", "RecentSearch", "RecentSearchCreate", "SortField", "SortOrder",
+    "WorkArrangement", "SeniorityLevel", "JobType",
     "JobApplicationStats",
     "CompanyApplicationMetrics",
     "JobApplicationCount",

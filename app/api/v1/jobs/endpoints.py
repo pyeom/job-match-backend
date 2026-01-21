@@ -9,10 +9,15 @@ from app.models.user import User, UserRole
 from app.models.job import Job
 from app.models.company import Company
 from app.schemas.job import Job as JobSchema, JobWithCompany, DiscoverResponse
+from app.schemas.search import JobSearchRequest, JobSearchResponse
+from app.services.search_service import search_service
 import uuid
 import base64
 import json
+import logging
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -226,3 +231,103 @@ async def get_job(
         raise HTTPException(status_code=404, detail="Job not found")
 
     return job
+
+
+@router.post("/search", response_model=JobSearchResponse)
+async def search_jobs(
+    search_request: JobSearchRequest,
+    current_user: User = Depends(get_job_seeker),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Advanced job search with comprehensive filters.
+
+    This endpoint provides powerful search and filtering capabilities:
+    - Keyword search across job title, company name, and description
+    - Salary range filtering with currency support
+    - Multi-select location filtering
+    - Work arrangement filtering (Remote/Hybrid/On-site)
+    - Seniority level filtering
+    - Job type filtering (Full-time/Part-time/Contract/etc.)
+    - Skills/tags filtering
+    - Multiple sort options (match score, posted date, salary)
+    - ML-powered match scoring for personalized results
+
+    The search automatically saves to the user's recent searches.
+    """
+    # Extract filter parameters from request
+    filters_used = search_request.model_dump(exclude_unset=True, exclude={"skip", "limit", "sort_by", "sort_order"})
+
+    # Perform search
+    scored_jobs, total = await search_service.search_jobs(
+        db=db,
+        user=current_user,
+        keyword=search_request.keyword,
+        salary_min=search_request.salary_min,
+        salary_max=search_request.salary_max,
+        currency=search_request.currency,
+        locations=search_request.locations,
+        work_arrangement=[w.value for w in search_request.work_arrangement] if search_request.work_arrangement else None,
+        seniority_levels=[s.value for s in search_request.seniority_levels] if search_request.seniority_levels else None,
+        job_types=[j.value for j in search_request.job_types] if search_request.job_types else None,
+        skills=search_request.skills,
+        sort_by=search_request.sort_by.value if search_request.sort_by else "match_score",
+        sort_order=search_request.sort_order.value if search_request.sort_order else "desc",
+        skip=search_request.skip,
+        limit=search_request.limit
+    )
+
+    # Save to recent searches (async, don't wait)
+    try:
+        await search_service.save_recent_search(
+            db=db,
+            user_id=current_user.id,
+            query=search_request.keyword,
+            filters_used=filters_used if filters_used else None
+        )
+        await db.commit()
+    except Exception as e:
+        # Don't fail the search if saving recent search fails
+        logger.error(f"Failed to save recent search: {e}")
+
+    # Convert to response format
+    job_results = []
+    for job, score in scored_jobs:
+        job_data = {
+            "id": job.id,
+            "title": job.title,
+            "company_id": job.company_id,
+            "location": job.location,
+            "short_description": job.short_description,
+            "description": job.description,
+            "tags": job.tags,
+            "seniority": job.seniority,
+            "salary_min": job.salary_min,
+            "salary_max": job.salary_max,
+            "currency": job.currency,
+            "remote": job.remote,
+            "work_arrangement": job.work_arrangement,
+            "job_type": job.job_type,
+            "is_active": job.is_active,
+            "created_at": job.created_at,
+            "updated_at": job.updated_at,
+            "company": {
+                "id": job.company.id,
+                "name": job.company.name,
+                "description": job.company.description,
+                "website": job.company.website,
+                "industry": job.company.industry,
+                "size": job.company.size,
+                "location": job.company.location,
+                "is_verified": job.company.is_verified
+            } if job.company else None,
+            "score": score
+        }
+        job_results.append(job_data)
+
+    return JobSearchResponse(
+        items=job_results,
+        total=total,
+        skip=search_request.skip,
+        limit=search_request.limit
+    )

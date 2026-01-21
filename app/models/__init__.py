@@ -6,8 +6,11 @@ from .interaction import Interaction
 from .company import Company
 from .notification import Notification, NotificationType
 from .push_token import PushToken, PushTokenPlatform
+from .filter_preset import FilterPreset
+from .recent_search import RecentSearch
 
 __all__ = [
     "User", "UserRole", "Job", "Swipe", "Application", "Interaction",
-    "Company", "Notification", "NotificationType", "PushToken", "PushTokenPlatform"
+    "Company", "Notification", "NotificationType", "PushToken", "PushTokenPlatform",
+    "FilterPreset", "RecentSearch"
 ]
