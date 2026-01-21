@@ -14,7 +14,10 @@ class JobBase(BaseModel):
     seniority: Optional[str] = None
     salary_min: Optional[int] = None
     salary_max: Optional[int] = None
+    currency: Optional[str] = "USD"
     remote: Optional[bool] = False
+    work_arrangement: Optional[str] = None
+    job_type: Optional[str] = None
 
 
 class JobCreate(JobBase):
@@ -30,7 +33,10 @@ class JobUpdate(BaseModel):
     seniority: Optional[str] = None
     salary_min: Optional[int] = None
     salary_max: Optional[int] = None
+    currency: Optional[str] = None
     remote: Optional[bool] = None
+    work_arrangement: Optional[str] = None
+    job_type: Optional[str] = None
     is_active: Optional[bool] = None
 
 

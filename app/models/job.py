@@ -19,10 +19,13 @@ class Job(Base):
     
     # Job metadata
     tags = Column(JSON)  # List of skills/technologies required
-    seniority = Column(String(50), index=True)  # Junior, Mid, Senior, Lead, etc.
+    seniority = Column(String(50), index=True)  # Entry, Junior, Mid, Senior, Lead, Executive
     salary_min = Column(Integer)
     salary_max = Column(Integer)
+    currency = Column(String(3), default="USD")  # USD, EUR, GBP, etc.
     remote = Column(Boolean, default=False)
+    work_arrangement = Column(String(50))  # Remote, Hybrid, On-site
+    job_type = Column(String(50))  # Full-time, Part-time, Contract, Freelance, Internship
     
     # ML embedding for job content (384 dimensions for all-MiniLM-L6-v2)  
     job_embedding = Column(Vector(384))
