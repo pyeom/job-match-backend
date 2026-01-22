@@ -370,6 +370,7 @@ class JobRepository(BaseRepository[Job]):
         salary_min: Optional[int] = None,
         salary_max: Optional[int] = None,
         currency: Optional[str] = None,
+        salary_negotiable: Optional[bool] = None,
         locations: Optional[List[str]] = None,
         work_arrangement: Optional[List[str]] = None,
         seniority_levels: Optional[List[str]] = None,
@@ -390,6 +391,7 @@ class JobRepository(BaseRepository[Job]):
             salary_min: Minimum salary filter
             salary_max: Maximum salary filter
             currency: Currency filter (USD, EUR, etc.)
+            salary_negotiable: Filter for negotiable salary jobs
             locations: Multi-select location filter
             work_arrangement: Remote/Hybrid/On-site filter
             seniority_levels: Seniority levels filter
@@ -441,6 +443,10 @@ class JobRepository(BaseRepository[Job]):
             # Apply currency filter
             if currency:
                 query = query.where(Job.currency == currency)
+
+            # Apply salary negotiable filter
+            if salary_negotiable is not None:
+                query = query.where(Job.salary_negotiable == salary_negotiable)
 
             # Apply location filters
             if locations:

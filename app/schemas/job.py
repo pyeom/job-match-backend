@@ -15,6 +15,7 @@ class JobBase(BaseModel):
     salary_min: Optional[int] = None
     salary_max: Optional[int] = None
     currency: Optional[str] = "USD"
+    salary_negotiable: Optional[bool] = False
     remote: Optional[bool] = False
     work_arrangement: Optional[str] = None
     job_type: Optional[str] = None
@@ -34,6 +35,7 @@ class JobUpdate(BaseModel):
     salary_min: Optional[int] = None
     salary_max: Optional[int] = None
     currency: Optional[str] = None
+    salary_negotiable: Optional[bool] = None
     remote: Optional[bool] = None
     work_arrangement: Optional[str] = None
     job_type: Optional[str] = None

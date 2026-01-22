@@ -1,8 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
-from app.api.v1 import auth, jobs, swipes, applications, users, companies, notifications
-from app.api.v1 import websocket
+from app.api.v1 import auth, jobs, swipes, applications, users, companies, notifications, filters
+from app.api.v1 import websocket, media
 
 app = FastAPI(
     title="Job Match API",
@@ -28,11 +28,14 @@ app.include_router(jobs.router, prefix="/api/v1/jobs", tags=["Jobs"])  # Job see
 app.include_router(companies.router, prefix="/api/v1/companies", tags=["Companies"])  # Company endpoints with nested job management
 app.include_router(swipes.router, prefix="/api/v1/swipes", tags=["Swipes"])
 app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["Notifications"])  # User notifications
+app.include_router(filters.router, prefix="/api/v1/filters", tags=["Filters"])  # Filter presets and suggestions
 # Applications endpoints: both user-specific (RESTful) and legacy (backward compatibility)
 app.include_router(applications.router, prefix="/api/v1/users", tags=["User Applications"])  # User-specific applications
 app.include_router(applications.router, prefix="/api/v1/applications", tags=["Applications (Legacy)"], deprecated=True)
 # WebSocket endpoint for real-time notifications
 app.include_router(websocket.router, tags=["WebSocket"])
+# Media serving endpoint for avatars and other files
+app.include_router(media.router, prefix="/api/v1/media", tags=["Media"])
 
 
 @app.get("/healthz")

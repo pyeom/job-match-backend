@@ -35,6 +35,8 @@ class User(Base):
     phone = Column(String(20))  # Phone number
     experience = Column(JSON)  # List of work experience objects
     education = Column(JSON)  # List of education objects
+    avatar_url = Column(String(500))  # URL to standard avatar (512x512)
+    avatar_thumbnail_url = Column(String(500))  # URL to thumbnail avatar (256x256)
     
     # ML embedding for user profile (384 dimensions for all-MiniLM-L6-v2)
     profile_embedding = Column(Vector(384))

@@ -266,6 +266,7 @@ async def search_jobs(
         salary_min=search_request.salary_min,
         salary_max=search_request.salary_max,
         currency=search_request.currency,
+        salary_negotiable=search_request.salary_negotiable,
         locations=search_request.locations,
         work_arrangement=[w.value for w in search_request.work_arrangement] if search_request.work_arrangement else None,
         seniority_levels=[s.value for s in search_request.seniority_levels] if search_request.seniority_levels else None,

@@ -34,6 +34,8 @@ class UserBase(BaseModel):
     preferred_locations: Optional[List[str]] = None
     seniority: Optional[str] = None
     role: UserRole = UserRole.JOB_SEEKER
+    avatar_url: Optional[str] = None
+    avatar_thumbnail_url: Optional[str] = None
 
 
 class UserCreate(UserBase):

@@ -23,9 +23,10 @@ class Job(Base):
     salary_min = Column(Integer)
     salary_max = Column(Integer)
     currency = Column(String(3), default="USD")  # USD, EUR, GBP, etc.
+    salary_negotiable = Column(Boolean, default=False)  # Whether salary is negotiable
     remote = Column(Boolean, default=False)
-    work_arrangement = Column(String(50))  # Remote, Hybrid, On-site
-    job_type = Column(String(50))  # Full-time, Part-time, Contract, Freelance, Internship
+    work_arrangement = Column(String(50), index=True)  # Remote, Hybrid, On-site
+    job_type = Column(String(50), index=True)  # Full-time, Part-time, Contract, Freelance, Internship
     
     # ML embedding for job content (384 dimensions for all-MiniLM-L6-v2)  
     job_embedding = Column(Vector(384))
