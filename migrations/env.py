@@ -6,18 +6,41 @@ from sqlalchemy import pool
 from alembic import context
 
 import os
+from dotenv import load_dotenv
 
+# Load .env file
+load_dotenv()
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
 
-db_url = os.getenv("DATABASE_URL")
-if db_url:
-    # Convert async URL to sync for Alembic migrations
-    if "postgresql+asyncpg://" in db_url:
-        db_url = db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
-    config.set_main_option("sqlalchemy.url", db_url)
+
+def get_database_url() -> str:
+    """Get database URL, constructing from components if needed."""
+    db_url = os.getenv("DATABASE_URL")
+
+    if not db_url:
+        # Construct from individual components
+        user = os.getenv("POSTGRES_USER", "jobmatch")
+        password = os.getenv("POSTGRES_PASSWORD", "jobmatch")
+        host = os.getenv("POSTGRES_HOST", "localhost")
+        port = os.getenv("POSTGRES_PORT", "5432")
+        db = os.getenv("POSTGRES_DB", "jobmatch")
+        db_url = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}"
+    else:
+        # Convert async URL to sync for Alembic migrations
+        if "postgresql+asyncpg://" in db_url:
+            db_url = db_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+        # Handle psycopg (v3) driver - alembic works better with psycopg2
+        elif "postgresql+psycopg://" in db_url:
+            db_url = db_url.replace("postgresql+psycopg://", "postgresql+psycopg2://")
+
+    return db_url
+
+
+db_url = get_database_url()
+config.set_main_option("sqlalchemy.url", db_url)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

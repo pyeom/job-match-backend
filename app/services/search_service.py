@@ -54,6 +54,7 @@ class SearchService:
         salary_min: Optional[int] = None,
         salary_max: Optional[int] = None,
         currency: Optional[str] = None,
+        salary_negotiable: Optional[bool] = None,
         locations: Optional[List[str]] = None,
         work_arrangement: Optional[List[str]] = None,
         seniority_levels: Optional[List[str]] = None,
@@ -74,6 +75,7 @@ class SearchService:
             salary_min: Minimum salary filter
             salary_max: Maximum salary filter
             currency: Currency filter
+            salary_negotiable: Filter for negotiable salary jobs
             locations: Multi-select location filter
             work_arrangement: Remote/Hybrid/On-site filter
             seniority_levels: Seniority levels filter
@@ -100,6 +102,7 @@ class SearchService:
                 salary_min=salary_min,
                 salary_max=salary_max,
                 currency=currency,
+                salary_negotiable=salary_negotiable,
                 locations=locations,
                 work_arrangement=work_arrangement,
                 seniority_levels=seniority_levels,
