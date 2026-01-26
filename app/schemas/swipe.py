@@ -17,9 +17,43 @@ class Swipe(BaseModel):
     job_id: uuid.UUID
     direction: str
     created_at: datetime
+    is_undone: bool = False
+    undone_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+
+class SwipeWithUndoWindow(BaseModel):
+    """Swipe response including undo window information"""
+    id: uuid.UUID
+    user_id: uuid.UUID
+    job_id: uuid.UUID
+    direction: str
+    created_at: datetime
+    is_undone: bool
+    can_undo: bool
+    remaining_undo_time: Optional[int] = None  # Seconds remaining in undo window
+
+    class Config:
+        from_attributes = True
+
+
+class UndoResponse(BaseModel):
+    """Response for successful undo operation"""
+    message: str
+    swipe_id: uuid.UUID
+    job_id: uuid.UUID
+    undone_at: datetime
+    remaining_daily_undos: int
+
+
+class UndoLimitInfo(BaseModel):
+    """Information about user's undo limits and usage"""
+    daily_limit: int
+    used_today: int
+    remaining_today: int
+    is_premium: bool
 
 
 class RejectedJobItem(BaseModel):

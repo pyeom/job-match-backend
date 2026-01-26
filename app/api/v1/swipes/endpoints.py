@@ -9,8 +9,17 @@ from app.models.user import User
 from app.models.job import Job
 from app.models.swipe import Swipe
 from app.models.application import Application
-from app.schemas.swipe import SwipeCreate, Swipe as SwipeSchema, RejectedJobsResponse, RejectedJobItem
+from app.schemas.swipe import (
+    SwipeCreate,
+    Swipe as SwipeSchema,
+    SwipeWithUndoWindow,
+    UndoResponse,
+    UndoLimitInfo,
+    RejectedJobsResponse,
+    RejectedJobItem
+)
 from app.schemas.job import JobWithCompany
+from app.services.swipe_service import SwipeService
 import base64
 import json
 from datetime import datetime
@@ -39,10 +48,11 @@ async def create_swipe(
     if swipe_data.direction not in ["LEFT", "RIGHT"]:
         raise HTTPException(status_code=400, detail="Direction must be LEFT or RIGHT")
 
-    # Check if swipe already exists (update if so)
+    # Check if swipe already exists and is not undone (update if so)
     result = await db.execute(select(Swipe).where(
         Swipe.user_id == current_user.id,
-        Swipe.job_id == swipe_data.job_id
+        Swipe.job_id == swipe_data.job_id,
+        Swipe.is_undone == False
     ))
     existing_swipe = result.scalar_one_or_none()
 
@@ -118,10 +128,14 @@ async def _update_user_embedding_if_needed(user: User, db):
     """Update user embedding based on right swipe history after threshold"""
     from app.services.embedding_service import embedding_service
 
-    # Count user's right swipes
+    # Count user's active (non-undone) right swipes
     result = await db.execute(
         select(func.count(Swipe.id))
-        .where(Swipe.user_id == user.id, Swipe.direction == "RIGHT")
+        .where(
+            Swipe.user_id == user.id,
+            Swipe.direction == "RIGHT",
+            Swipe.is_undone == False
+        )
     )
     right_swipe_count = result.scalar()
 
@@ -135,13 +149,14 @@ async def _update_user_embedding_if_needed(user: User, db):
         return
 
     try:
-        # Get jobs from recent right swipes (limit to last 10 for performance)
+        # Get jobs from recent active (non-undone) right swipes (limit to last 10 for performance)
         result = await db.execute(
             select(Job.job_embedding)
             .join(Swipe, Job.id == Swipe.job_id)
             .where(
                 Swipe.user_id == user.id,
                 Swipe.direction == "RIGHT",
+                Swipe.is_undone == False,
                 Job.job_embedding.isnot(None)
             )
             .order_by(Swipe.created_at.desc())
@@ -343,3 +358,139 @@ async def get_rejected_jobs(
         has_more=has_more,
         next_cursor=next_cursor
     )
+
+
+@router.get("/last", response_model=Optional[SwipeWithUndoWindow])
+async def get_last_swipe(
+    current_user: User = Depends(get_job_seeker),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get the user's last swipe within the undo window
+
+    This endpoint returns the most recent swipe if it's within the 5-second
+    undo window, along with information about whether it can be undone and
+    how much time remains.
+
+    Features:
+    - Returns None if no recent swipe within undo window
+    - Includes remaining undo time in seconds
+    - Checks daily undo limit eligibility
+    - Only returns non-undone swipes
+
+    Response includes:
+    - Swipe details (id, job_id, direction, created_at)
+    - can_undo: Whether the swipe can be undone
+    - remaining_undo_time: Seconds remaining in undo window
+    """
+    swipe_service = SwipeService()
+
+    # Reset daily counter if needed
+    await swipe_service.check_and_reset_daily_counter(db, current_user)
+
+    # Get last swipe with window info
+    result = await swipe_service.get_last_swipe_with_window(db, current_user)
+
+    if not result:
+        return None
+
+    swipe, remaining_time = result
+
+    # Check if user can undo (considering daily limit)
+    can_undo, _ = await swipe_service.check_undo_eligibility(db, current_user, swipe)
+
+    return SwipeWithUndoWindow(
+        id=swipe.id,
+        user_id=swipe.user_id,
+        job_id=swipe.job_id,
+        direction=swipe.direction,
+        created_at=swipe.created_at,
+        is_undone=swipe.is_undone,
+        can_undo=can_undo,
+        remaining_undo_time=remaining_time if remaining_time > 0 else None
+    )
+
+
+@router.delete("/{swipe_id}", response_model=UndoResponse)
+async def undo_swipe(
+    swipe_id: str,
+    current_user: User = Depends(get_job_seeker),
+    db: AsyncSession = Depends(get_db)
+):
+    """Undo a swipe (soft delete)
+
+    This endpoint allows users to undo their last swipe within a 5-second window.
+    The operation marks the swipe as undone and removes any associated application
+    if it was a RIGHT swipe.
+
+    Constraints:
+    - Swipe must be within 5-second undo window
+    - Swipe must belong to the current user
+    - Swipe must not be already undone
+    - User must not exceed daily undo limit (3 for free, 10 for premium)
+
+    The operation:
+    1. Validates swipe ownership and eligibility
+    2. Marks swipe as undone with timestamp
+    3. Increments user's daily undo counter
+    4. Deletes associated application (if RIGHT swipe)
+
+    Returns:
+    - Confirmation message
+    - Swipe and job IDs
+    - Timestamp of undo
+    - Remaining daily undos
+    """
+    from uuid import UUID
+
+    try:
+        swipe_uuid = UUID(swipe_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid swipe ID format")
+
+    swipe_service = SwipeService()
+
+    # Undo the swipe
+    swipe = await swipe_service.undo_swipe(db, current_user, swipe_uuid)
+
+    # Commit transaction
+    await db.commit()
+    await db.refresh(swipe)
+    await db.refresh(current_user)
+
+    # Get remaining undos
+    remaining = swipe_service.get_remaining_daily_undos(current_user)
+
+    return UndoResponse(
+        message="Swipe undone successfully",
+        swipe_id=swipe.id,
+        job_id=swipe.job_id,
+        undone_at=swipe.undone_at,
+        remaining_daily_undos=remaining
+    )
+
+
+@router.get("/undo-limits", response_model=UndoLimitInfo)
+async def get_undo_limits(
+    current_user: User = Depends(get_job_seeker),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get information about the user's undo limits and usage
+
+    This endpoint returns information about:
+    - Daily undo limit (3 for free users, 10 for premium)
+    - Number of undos used today
+    - Number of undos remaining today
+    - Premium status
+
+    The daily counter resets at midnight UTC.
+    """
+    swipe_service = SwipeService()
+
+    # Reset daily counter if needed
+    await swipe_service.check_and_reset_daily_counter(db, current_user)
+    await db.commit()
+
+    # Get limit info
+    info = swipe_service.get_undo_limit_info(current_user)
+
+    return UndoLimitInfo(**info)

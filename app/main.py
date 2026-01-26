@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.v1 import auth, jobs, swipes, applications, users, companies, notifications, filters
-from app.api.v1 import websocket, media
+from app.api.v1 import websocket, media, documents
 
 app = FastAPI(
     title="Job Match API",
@@ -32,6 +32,8 @@ app.include_router(filters.router, prefix="/api/v1/filters", tags=["Filters"])  
 # Applications endpoints: both user-specific (RESTful) and legacy (backward compatibility)
 app.include_router(applications.router, prefix="/api/v1/users", tags=["User Applications"])  # User-specific applications
 app.include_router(applications.router, prefix="/api/v1/applications", tags=["Applications (Legacy)"], deprecated=True)
+# Document management endpoints
+app.include_router(documents.router, prefix="/api/v1/documents", tags=["Documents"])
 # WebSocket endpoint for real-time notifications
 app.include_router(websocket.router, tags=["WebSocket"])
 # Media serving endpoint for avatars and other files

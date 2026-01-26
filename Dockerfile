@@ -8,12 +8,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Install system dependencies (required for sentence-transformers and ML libraries)
+# Install system dependencies (required for sentence-transformers, ML libraries, and file type detection)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     libopenblas-dev \
     curl \
+    libmagic1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies separately to maximize layer caching
