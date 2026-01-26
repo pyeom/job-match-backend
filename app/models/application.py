@@ -13,6 +13,10 @@ class Application(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
     job_id = Column(UUID(as_uuid=True), ForeignKey("jobs.id"), nullable=False, index=True)
 
+    # Document attachments
+    resume_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True)
+    cover_letter_id = Column(UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True)
+
     # New 5-stage pipeline fields
     stage = Column(String(25), nullable=False, default="SUBMITTED", index=True)
     # Values: SUBMITTED, REVIEW, INTERVIEW, TECHNICAL, DECISION
@@ -41,6 +45,8 @@ class Application(Base):
     # Relationships
     user = relationship("User")
     job = relationship("Job")
+    resume_document = relationship("Document", foreign_keys=[resume_id], back_populates="applications_as_resume")
+    cover_letter_document = relationship("Document", foreign_keys=[cover_letter_id], back_populates="applications_as_cover_letter")
 
     def __repr__(self):
         return f"<Application(user_id={self.user_id}, job_id={self.job_id}, stage={self.stage}, status={self.status})>"

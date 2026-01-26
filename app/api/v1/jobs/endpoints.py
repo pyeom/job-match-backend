@@ -73,7 +73,8 @@ async def discover_jobs(
     if cursor:
         cursor_score, cursor_job_id, cursor_created_at = decode_cursor(cursor)
 
-    # Get jobs that user hasn't swiped on, using vector similarity if user has profile embedding
+    # Get jobs that user hasn't swiped on (or has undone the swipe)
+    # using vector similarity if user has profile embedding
     base_query = (
         select(Job)
         .options(selectinload(Job.company))
@@ -83,7 +84,8 @@ async def discover_jobs(
                 not_(exists().where(
                     and_(
                         Swipe.job_id == Job.id,
-                        Swipe.user_id == current_user.id
+                        Swipe.user_id == current_user.id,
+                        Swipe.is_undone == False  # Exclude only active swipes, allow undone ones
                     )
                 ))
             )
