@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.api.v1 import auth, jobs, swipes, applications, users, companies, notifications, filters
-from app.api.v1 import websocket, media, documents
+from app.api.v1 import websocket, media, documents, ai
 
 app = FastAPI(
     title="Job Match API",
@@ -38,6 +38,8 @@ app.include_router(documents.router, prefix="/api/v1/documents", tags=["Document
 app.include_router(websocket.router, tags=["WebSocket"])
 # Media serving endpoint for avatars and other files
 app.include_router(media.router, prefix="/api/v1/media", tags=["Media"])
+# AI-powered features (match explanations, insights)
+app.include_router(ai.router, prefix="/api/v1/ai", tags=["AI Features"])
 
 
 @app.get("/healthz")

@@ -351,6 +351,28 @@ class StorageService:
 
         return None
 
+    async def read_file(self, storage_path: str) -> Optional[bytes]:
+        """
+        Read a file from storage path.
+
+        Args:
+            storage_path: The storage path (e.g., "media/documents/{user_id}/{filename}")
+
+        Returns:
+            File content as bytes or None if file doesn't exist
+        """
+        file_path = Path(storage_path)
+
+        try:
+            if file_path.exists():
+                async with aiofiles.open(file_path, 'rb') as f:
+                    return await f.read()
+        except Exception as e:
+            print(f"Error reading file {file_path}: {e}")
+            return None
+
+        return None
+
 
 # Singleton instance
 storage_service = StorageService()
