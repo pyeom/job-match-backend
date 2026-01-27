@@ -31,6 +31,9 @@ from .statistics import (
     JobApplicationStatDetail,
     JobApplicationStatsResponse
 )
+from .resume_review import (
+    ResumeReviewRequest, ResumeReviewResponse, ResumeSection, KeywordAnalysis
+)
 
 __all__ = [
     "Token", "TokenData", "UserCreate", "UserLogin",
@@ -59,5 +62,6 @@ __all__ = [
     "ApplicantsRecentResponse",
     "DashboardStatsResponse",
     "JobApplicationStatDetail",
-    "JobApplicationStatsResponse"
+    "JobApplicationStatsResponse",
+    "ResumeReviewRequest", "ResumeReviewResponse", "ResumeSection", "KeywordAnalysis"
 ]
