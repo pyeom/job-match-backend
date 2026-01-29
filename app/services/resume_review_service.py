@@ -3,6 +3,7 @@ AI-powered resume review service.
 
 This service analyzes resumes and provides actionable improvement suggestions.
 It evaluates structure, content, keywords, formatting, and relevance to target jobs.
+Supports English and Spanish resumes.
 """
 
 from typing import Optional, List, Dict, Set
@@ -17,6 +18,7 @@ from app.schemas.resume_review import (
 )
 from app.models.document import Document
 from app.models.job import Job
+from app.services.resume_parser_service import ResumeParserService
 
 logger = logging.getLogger(__name__)
 
@@ -24,18 +26,32 @@ logger = logging.getLogger(__name__)
 class ResumeReviewService:
     """Service for analyzing resumes and generating improvement suggestions."""
 
-    # Common resume sections to look for
+    # Common resume sections to look for (English and Spanish)
     EXPECTED_SECTIONS = {
+        # English
         "contact", "summary", "objective", "experience", "work", "employment",
         "education", "skills", "projects", "certifications", "achievements",
-        "awards", "publications", "languages"
+        "awards", "publications", "languages",
+        # Spanish
+        "contacto", "resumen", "perfil", "objetivo", "experiencia", "empleo",
+        "educación", "educacion", "formación", "formacion", "habilidades",
+        "aptitudes", "competencias", "proyectos", "certificaciones", "logros",
+        "premios", "publicaciones", "idiomas"
     }
 
-    # Keywords indicating quantified achievements
+    # Use section patterns from the resume parser for multilingual support
+    SECTION_PATTERNS = ResumeParserService.SECTION_PATTERNS
+
+    # Keywords indicating quantified achievements (English and Spanish)
     QUANTIFICATION_KEYWORDS = [
-        r'\d+%', r'\$\d+', r'\d+\+', r'\d+x', r'\d+ million', r'\d+ billion',
-        r'\d+ thousand', r'increased', r'decreased', r'reduced', r'improved',
-        r'grew', r'generated', r'saved', r'achieved'
+        r'\d+%', r'\$\d+', r'€\d+', r'\d+\+', r'\d+x', r'\d+ million', r'\d+ billion',
+        r'\d+ thousand', r'\d+ millones', r'\d+ mil',
+        # English
+        r'increased', r'decreased', r'reduced', r'improved', r'grew', r'generated', r'saved', r'achieved',
+        # Spanish
+        r'aumenté', r'aumente', r'incrementé', r'incremente', r'reduje', r'disminuí', r'disminui',
+        r'mejoré', r'mejore', r'crecí', r'creci', r'generé', r'genere', r'ahorré', r'ahorre',
+        r'logré', r'logre'
     ]
 
     # Contact information patterns
@@ -45,12 +61,21 @@ class ResumeReviewService:
         r'\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}',  # Phone with area code
     ]
 
-    # Action verbs for strong resume writing
+    # Action verbs for strong resume writing (English and Spanish)
     STRONG_ACTION_VERBS = {
+        # English
         "led", "managed", "developed", "created", "implemented", "designed",
         "achieved", "improved", "increased", "reduced", "launched", "built",
         "established", "coordinated", "directed", "executed", "optimized",
-        "streamlined", "delivered", "drove", "spearheaded", "initiated"
+        "streamlined", "delivered", "drove", "spearheaded", "initiated",
+        # Spanish
+        "lideré", "lidere", "gestioné", "gestione", "desarrollé", "desarrolle",
+        "creé", "cree", "implementé", "implemente", "diseñé", "diseñe",
+        "logré", "logre", "mejoré", "mejore", "aumenté", "aumente",
+        "reduje", "lancé", "lance", "construí", "construi", "establecí",
+        "estableci", "coordiné", "coordine", "dirigí", "dirigi", "ejecuté",
+        "ejecute", "optimicé", "optimice", "entregué", "entregue", "impulsé",
+        "impulse", "inicié", "inicie", "supervisé", "supervise"
     }
 
     def analyze_resume(
@@ -176,34 +201,44 @@ class ResumeReviewService:
         return sections
 
     def _detect_sections(self, lines: List[str]) -> Dict[str, str]:
-        """Detect major sections in the resume."""
+        """Detect major sections in the resume using multilingual patterns."""
         sections = {}
         current_section = "header"
         current_content = []
 
         for line in lines:
-            line_lower = line.lower().strip()
+            line_stripped = line.strip()
+            if not line_stripped:
+                current_content.append("")
+                continue
 
-            # Check if line is a section header
-            is_section_header = False
-            for section_keyword in self.EXPECTED_SECTIONS:
-                if section_keyword in line_lower and len(line.split()) <= 3:
-                    # Save previous section
-                    if current_content:
-                        sections[current_section] = '\n'.join(current_content)
-
-                    # Start new section
-                    current_section = section_keyword
-                    current_content = []
-                    is_section_header = True
+            # Check if line matches any section pattern (multilingual)
+            section_found = None
+            for section_name, pattern in self.SECTION_PATTERNS.items():
+                if re.match(pattern, line_stripped):
+                    section_found = section_name
                     break
 
-            if not is_section_header and line.strip():
+            # Fallback: check for simple keyword match
+            if not section_found:
+                line_lower = line_stripped.lower()
+                for section_keyword in self.EXPECTED_SECTIONS:
+                    if section_keyword in line_lower and len(line_stripped.split()) <= 4:
+                        section_found = section_keyword
+                        break
+
+            if section_found:
+                # Save previous section
+                if current_content:
+                    sections[current_section] = '\n'.join(current_content).strip()
+                current_section = section_found
+                current_content = []
+            else:
                 current_content.append(line)
 
         # Save last section
         if current_content:
-            sections[current_section] = '\n'.join(current_content)
+            sections[current_section] = '\n'.join(current_content).strip()
 
         return sections
 
@@ -326,15 +361,17 @@ class ResumeReviewService:
     def _analyze_education_section(
         self, content: str
     ) -> tuple[float, List[str], List[str], List[str]]:
-        """Analyze education section."""
+        """Analyze education section (supports English and Spanish)."""
         score = 0.7
         strengths = []
         weaknesses = []
         suggestions = []
 
-        # Check for degree information
+        # Check for degree information (English and Spanish)
         has_degree = bool(re.search(
-            r'\b(bachelor|master|phd|doctorate|associate|b\.s\.|m\.s\.|b\.a\.|m\.a\.)\b',
+            r'\b(bachelor|master|phd|doctorate|associate|b\.s\.|m\.s\.|b\.a\.|m\.a\.|'
+            r'licenciatura|licenciado|ingenier[ií]a|ingeniero|maestr[ií]a|doctorado|'
+            r'grado|t[eé]cnico|diplomado|mag[ií]ster)\b',
             content, re.IGNORECASE
         ))
 
@@ -342,7 +379,7 @@ class ResumeReviewService:
             strengths.append("Includes degree information")
             score += 0.15
         else:
-            suggestions.append("Clearly state your degree type (Bachelor's, Master's, etc.)")
+            suggestions.append("Clearly state your degree type (Bachelor's/Licenciatura, Master's/Maestría, etc.)")
 
         # Check for graduation date or year
         has_date = bool(re.search(r'\b(20\d{2}|19\d{2})\b', content))

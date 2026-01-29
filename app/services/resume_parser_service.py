@@ -28,15 +28,15 @@ logger = logging.getLogger(__name__)
 class ResumeParserService:
     """Service for parsing resume text and extracting structured information."""
 
-    # Common section headers
+    # Common section headers (English and Spanish)
     SECTION_PATTERNS = {
-        "summary": r"(?i)^(?:summary|profile|objective|about\s*me|professional\s*summary|career\s*objective)[\s:]*$",
-        "experience": r"(?i)^(?:experience|work\s*experience|employment|professional\s*experience|work\s*history|career\s*history)[\s:]*$",
-        "education": r"(?i)^(?:education|academic|qualifications|academic\s*background|educational\s*background)[\s:]*$",
-        "skills": r"(?i)^(?:skills|technical\s*skills|core\s*competencies|competencies|technologies|expertise|proficiencies)[\s:]*$",
-        "certifications": r"(?i)^(?:certifications?|certificates?|licenses?|credentials)[\s:]*$",
-        "projects": r"(?i)^(?:projects|personal\s*projects|key\s*projects)[\s:]*$",
-        "languages": r"(?i)^(?:languages|language\s*skills)[\s:]*$",
+        "summary": r"(?i)^(?:summary|profile|objective|about\s*me|professional\s*summary|career\s*objective|resumen|perfil|objetivo|sobre\s*m[ií]|resumen\s*profesional|objetivo\s*profesional|extracto|descripci[oó]n)[\s:]*$",
+        "experience": r"(?i)^(?:experience|work\s*experience|employment|professional\s*experience|work\s*history|career\s*history|experiencia|experiencia\s*laboral|experiencia\s*profesional|historial\s*laboral|empleo|trayectoria\s*profesional|trayectoria\s*laboral)[\s:]*$",
+        "education": r"(?i)^(?:education|academic|qualifications|academic\s*background|educational\s*background|educaci[oó]n|formaci[oó]n|formaci[oó]n\s*acad[eé]mica|estudios|preparaci[oó]n\s*acad[eé]mica|t[ií]tulos)[\s:]*$",
+        "skills": r"(?i)^(?:skills|technical\s*skills|core\s*competencies|competencies|technologies|expertise|proficiencies|habilidades|aptitudes|competencias|conocimientos|habilidades\s*t[eé]cnicas|tecnolog[ií]as|destrezas|capacidades)[\s:]*$",
+        "certifications": r"(?i)^(?:certifications?|certificates?|licenses?|credentials|certificaciones?|certificados?|licencias?|credenciales|acreditaciones?)[\s:]*$",
+        "projects": r"(?i)^(?:projects|personal\s*projects|key\s*projects|proyectos|proyectos\s*personales|proyectos\s*principales|portafolio)[\s:]*$",
+        "languages": r"(?i)^(?:languages|language\s*skills|idiomas|lenguas|competencias\s*ling[uü][ií]sticas)[\s:]*$",
     }
 
     # Regex patterns for contact extraction
@@ -101,19 +101,28 @@ class ResumeParserService:
         "thai", "indonesian", "malay", "tagalog", "hebrew", "greek", "czech",
     }
 
-    # Education degree patterns
+    # Education degree patterns (English and Spanish)
     DEGREE_PATTERNS = [
+        # English degrees
         r"(?i)(ph\.?d\.?|doctor(?:ate)?)\s*(?:of|in)?\s*(\w+(?:\s+\w+)*)?",
         r"(?i)(master'?s?|m\.?s\.?|m\.?a\.?|m\.?b\.?a\.?|m\.?eng\.?)\s*(?:of|in)?\s*(\w+(?:\s+\w+)*)?",
         r"(?i)(bachelor'?s?|b\.?s\.?|b\.?a\.?|b\.?eng\.?|b\.?tech\.?)\s*(?:of|in)?\s*(\w+(?:\s+\w+)*)?",
         r"(?i)(associate'?s?|a\.?s\.?|a\.?a\.?)\s*(?:of|in)?\s*(\w+(?:\s+\w+)*)?",
+        # Spanish degrees
+        r"(?i)(doctorado|doctor|ph\.?d\.?)\s*(?:en)?\s*(\w+(?:\s+\w+)*)?",
+        r"(?i)(maestr[ií]a|master|mag[ií]ster|m\.?s\.?c\.?)\s*(?:en)?\s*(\w+(?:\s+\w+)*)?",
+        r"(?i)(licenciatura|licenciado|ingenier[ií]a|ingeniero|grado)\s*(?:en)?\s*(\w+(?:\s+\w+)*)?",
+        r"(?i)(t[eé]cnico|tecnicatura|diplomado)\s*(?:en)?\s*(\w+(?:\s+\w+)*)?",
     ]
 
-    # Date patterns
+    # Date patterns (English and Spanish)
     DATE_PATTERNS = [
+        # English months
         r"(?i)(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s*[,.]?\s*(\d{4})",
+        # Spanish months
+        r"(?i)(ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:t(?:iembre)?)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)\s*[,.]?\s*(\d{4})",
         r"(\d{1,2})[/\-](\d{4})",
-        r"(\d{4})\s*[-–]\s*(\d{4}|present|current|now)",
+        r"(\d{4})\s*[-–]\s*(\d{4}|present|current|now|actual|actualidad|presente)",
     ]
 
     def __init__(self):
@@ -300,9 +309,16 @@ class ResumeParserService:
                 if line and not self.email_regex.search(line) and not self.phone_regex.search(line):
                     if not re.match(r"^[\d\s\-\(\)\+]+$", line):
                         if len(line) < 80 and len(line) > 10:
-                            # Check if it looks like a title
-                            title_words = ["engineer", "developer", "manager", "analyst", "designer",
-                                          "architect", "specialist", "consultant", "director", "lead"]
+                            # Check if it looks like a title (English and Spanish)
+                            title_words = [
+                                # English
+                                "engineer", "developer", "manager", "analyst", "designer",
+                                "architect", "specialist", "consultant", "director", "lead",
+                                # Spanish
+                                "ingeniero", "desarrollador", "programador", "gerente", "analista",
+                                "diseñador", "arquitecto", "especialista", "consultor", "director",
+                                "líder", "coordinador", "jefe", "técnico", "administrador"
+                            ]
                             if any(word in line.lower() for word in title_words):
                                 headline = line
                                 break
@@ -380,11 +396,15 @@ class ResumeParserService:
 
     def _looks_like_job_header(self, line: str) -> bool:
         """Check if a line looks like a job title/company header."""
-        # Common patterns in job headers
+        # Common patterns in job headers (English and Spanish)
         patterns = [
+            # English job titles
             r"(?i)(engineer|developer|manager|analyst|designer|director|lead|specialist|consultant|intern|associate)",
+            # Spanish job titles
+            r"(?i)(ingeniero|desarrollador|programador|gerente|analista|dise[ñn]ador|director|l[ií]der|especialista|consultor|practicante|asistente|coordinador|jefe|supervisor|t[eé]cnico|arquitecto|administrador)",
             r"@|at\s+[A-Z]",  # "at Company"
             r"[A-Z][a-z]+\s*[-|]\s*[A-Z]",  # "Title - Company" or "Title | Company"
+            r"(?i)\s+en\s+[A-Z]",  # "en Empresa" (Spanish "at Company")
         ]
         for pattern in patterns:
             if re.search(pattern, line):
@@ -409,7 +429,12 @@ class ResumeParserService:
 
     def _parse_dates(self, line: str) -> Tuple[Optional[str], Optional[str], bool]:
         """Parse start/end dates from a line."""
-        is_current = "present" in line.lower() or "current" in line.lower() or "now" in line.lower()
+        line_lower = line.lower()
+        # Check for current position indicators (English and Spanish)
+        is_current = any(word in line_lower for word in [
+            "present", "current", "now",  # English
+            "actual", "actualidad", "presente", "vigente"  # Spanish
+        ])
 
         dates = []
         for pattern in self.DATE_PATTERNS:
@@ -460,8 +485,14 @@ class ResumeParserService:
                     degree_match = match
                     break
 
-            # Check for institution keywords
-            is_institution = any(word in line.lower() for word in ["university", "college", "institute", "school"])
+            # Check for institution keywords (English and Spanish)
+            is_institution = any(word in line.lower() for word in [
+                # English
+                "university", "college", "institute", "school", "academy",
+                # Spanish
+                "universidad", "colegio", "instituto", "escuela", "academia",
+                "facultad", "politécnico", "politecnico", "tecnológico", "tecnologico"
+            ])
 
             if degree_match or is_institution:
                 # Save previous education
