@@ -18,9 +18,12 @@ from app.repositories.document_repository import DocumentRepository
 from app.schemas.match_explanation import MatchExplanation
 from app.schemas.interview_questions import InterviewQuestionsResponse
 from app.schemas.resume_review import ResumeReviewRequest, ResumeReviewResponse
+from app.schemas.resume_parser import ResumeParseRequest, ProfileAutoFillResponse
 from app.services.match_explanation_service import match_explanation_service
 from app.services.interview_predictor_service import interview_predictor_service
 from app.services.resume_review_service import resume_review_service
+from app.services.resume_parser_service import resume_parser_service
+from app.services.user_service import user_service
 from app.services.document_parser import document_parser
 from app.services.storage_service import storage_service
 
@@ -337,3 +340,161 @@ async def review_resume(
             status_code=500,
             detail="Failed to analyze resume. Please try again later."
         )
+
+
+@router.post("/parse-resume", response_model=ProfileAutoFillResponse)
+async def parse_resume(
+    request: ResumeParseRequest = Body(...),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Parse resume using AI and optionally auto-fill user profile.
+
+    This endpoint uses AI/NLP to extract structured information from an uploaded resume:
+    - Contact information (name, email, phone, LinkedIn, GitHub, portfolio)
+    - Professional summary and headline
+    - Work experience (title, company, dates, description)
+    - Education (degree, institution, field of study, dates)
+    - Skills (categorized as technical, soft skills, languages, certifications)
+
+    The parsing uses a hybrid approach combining:
+    - Regex patterns for structured data (emails, phones, dates)
+    - NLP techniques for section detection
+    - Keyword matching for skills and technologies
+    - Heuristics for experience and education extraction
+
+    If auto_fill_profile is True, the parsed data will automatically update
+    the user's profile fields that are currently empty. Existing data is preserved.
+
+    Args:
+        document_id: UUID of the uploaded resume document
+        auto_fill_profile: Whether to automatically update profile with parsed data
+
+    Returns:
+        Parsed resume data and profile update status
+
+    Requires:
+        - User must be authenticated
+        - Document must exist and belong to the user
+        - Document must be of type 'resume'
+        - Document must have extractable text content
+    """
+
+    # Get the document
+    doc_repo = DocumentRepository()
+    document = await doc_repo.get(db, request.document_id)
+
+    if not document:
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found"
+        )
+
+    # Verify document belongs to current user
+    if document.user_id != current_user.id:
+        raise HTTPException(
+            status_code=403,
+            detail="You don't have permission to access this document"
+        )
+
+    # Verify document is a resume
+    if document.document_type != "resume":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Document must be of type 'resume'. This document is a '{document.document_type}'."
+        )
+
+    # Get resume text content
+    resume_text = None
+
+    # First try to use cached extracted_text
+    if document.extracted_text:
+        resume_text = document.extracted_text
+    else:
+        # Extract text from the document file
+        try:
+            # Read file from storage
+            file_content = await storage_service.read_file(document.storage_path)
+
+            if not file_content:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not read document file from storage"
+                )
+
+            # Extract text using document parser
+            resume_text = document_parser.extract_text(file_content, document.file_type)
+
+            if not resume_text:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not extract text from document. The file may be corrupted or in an unsupported format."
+                )
+
+            # Cache the extracted text for future use
+            document.extracted_text = resume_text
+            await db.commit()
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Error reading/parsing document {request.document_id}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to process document file"
+            )
+
+    # Parse the resume
+    try:
+        parsed_data = resume_parser_service.parse_resume(
+            resume_text=resume_text,
+            document_id=str(request.document_id)
+        )
+
+        logger.info(
+            f"Resume parsed for document {request.document_id}, "
+            f"user {current_user.id}, confidence: {parsed_data.confidence_score:.2f}"
+        )
+
+    except Exception as e:
+        logger.error(f"Error parsing resume {request.document_id}, user {current_user.id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to parse resume. Please try again later."
+        )
+
+    # Auto-fill profile if requested
+    profile_updated = False
+    fields_updated = []
+
+    if request.auto_fill_profile:
+        try:
+            updated_user, fields_updated = await user_service.update_profile_from_resume(
+                db=db,
+                user=current_user,
+                parsed_data=parsed_data
+            )
+            profile_updated = bool(fields_updated)
+
+            logger.info(
+                f"Profile auto-filled for user {current_user.id}. "
+                f"Fields updated: {fields_updated}"
+            )
+
+        except Exception as e:
+            logger.error(f"Error auto-filling profile for user {current_user.id}: {e}")
+            # Don't fail the entire request if auto-fill fails
+            # Just log the error and continue
+
+    return ProfileAutoFillResponse(
+        document_id=request.document_id,
+        parsed_data=parsed_data,
+        profile_updated=profile_updated,
+        fields_updated=fields_updated,
+        message="Resume parsed successfully" + (
+            f" and profile updated ({len(fields_updated)} fields)"
+            if profile_updated
+            else ""
+        )
+    )
