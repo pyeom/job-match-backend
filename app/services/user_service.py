@@ -160,12 +160,30 @@ class UserService:
         all_titles = " ".join([exp.title.lower() for exp in parsed_data.experience])
 
         seniority_keywords = {
-            "intern": ["intern", "internship", "trainee"],
-            "junior": ["junior", "entry level", "entry-level", "associate", "jr."],
-            "mid": ["mid level", "mid-level", "intermediate"],
-            "senior": ["senior", "sr.", "principal", "staff"],
-            "lead": ["lead", "team lead", "tech lead", "architect"],
-            "manager": ["manager", "director", "head of", "vp", "chief", "cto", "ceo"]
+            "intern": [
+                "intern", "internship", "trainee",  # English
+                "practicante", "pasante", "becario", "aprendiz"  # Spanish
+            ],
+            "junior": [
+                "junior", "entry level", "entry-level", "associate", "jr.",  # English
+                "principiante", "nivel inicial", "asistente"  # Spanish
+            ],
+            "mid": [
+                "mid level", "mid-level", "intermediate",  # English
+                "nivel medio", "intermedio", "semi senior", "semi-senior", "ssr"  # Spanish
+            ],
+            "senior": [
+                "senior", "sr.", "principal", "staff",  # English
+                "especialista", "experto"  # Spanish
+            ],
+            "lead": [
+                "lead", "team lead", "tech lead", "architect",  # English
+                "líder", "lider", "jefe de equipo", "arquitecto", "coordinador"  # Spanish
+            ],
+            "manager": [
+                "manager", "director", "head of", "vp", "chief", "cto", "ceo",  # English
+                "gerente", "director", "jefe", "responsable", "encargado"  # Spanish
+            ]
         }
 
         # Check from most senior to least

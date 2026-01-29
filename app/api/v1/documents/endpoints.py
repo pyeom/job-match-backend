@@ -20,10 +20,63 @@ from app.repositories.document_repository import document_repository
 from app.services.document_service import document_service
 from app.services.storage_service import storage_service
 from app.services.document_parser import document_parser
+from app.services.resume_parser_service import resume_parser_service
+from app.services.user_service import user_service
 import uuid as uuid_lib
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+async def auto_parse_resume_and_update_profile(
+    db: AsyncSession,
+    user: User,
+    extracted_text: str,
+    document_id: UUID
+):
+    """
+    Automatically parse a resume and update the user's profile.
+    This runs in the background after a resume upload.
+    """
+    try:
+        if not extracted_text:
+            logger.warning(f"No extracted text for document {document_id}, skipping auto-parse")
+            return
+
+        # Parse the resume
+        parsed_data = resume_parser_service.parse_resume(
+            resume_text=extracted_text,
+            document_id=str(document_id)
+        )
+
+        logger.info(
+            f"Auto-parsed resume {document_id} for user {user.id}, "
+            f"confidence: {parsed_data.confidence_score:.2f}, "
+            f"skills found: {len(parsed_data.skills.all_skills)}"
+        )
+
+        # Only auto-update if we have reasonable confidence
+        if parsed_data.confidence_score >= 0.3:
+            updated_user, fields_updated = await user_service.update_profile_from_resume(
+                db=db,
+                user=user,
+                parsed_data=parsed_data
+            )
+
+            if fields_updated:
+                logger.info(
+                    f"Auto-updated profile for user {user.id} from resume {document_id}. "
+                    f"Fields updated: {fields_updated}"
+                )
+        else:
+            logger.info(
+                f"Skipping auto-update for user {user.id}, "
+                f"confidence too low: {parsed_data.confidence_score:.2f}"
+            )
+
+    except Exception as e:
+        logger.error(f"Error in auto_parse_resume_and_update_profile for document {document_id}: {e}")
+        # Don't raise - this is a background task, shouldn't fail the upload
 
 router = APIRouter()
 
@@ -127,6 +180,15 @@ async def upload_document(
 
         await db.commit()
         await db.refresh(document)
+
+        # Auto-parse resume and update profile if this is a resume
+        if document_type == "resume" and extracted_text:
+            await auto_parse_resume_and_update_profile(
+                db=db,
+                user=current_user,
+                extracted_text=extracted_text,
+                document_id=document.id
+            )
 
     except Exception as e:
         await db.rollback()
