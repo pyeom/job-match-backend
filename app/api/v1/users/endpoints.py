@@ -31,10 +31,17 @@ async def update_current_user_legacy(
     DEPRECATED: Update current user profile
     Use PATCH /users/{user_id} instead
     """
+    from sqlalchemy.orm.attributes import flag_modified
+
     update_data = user_update.model_dump(exclude_unset=True)
+
+    # JSON/array columns that need explicit flagging for SQLAlchemy to detect changes
+    json_fields = {'skills', 'experience', 'education', 'preferred_locations'}
 
     for field, value in update_data.items():
         setattr(current_user, field, value)
+        if field in json_fields:
+            flag_modified(current_user, field)
 
     # Recalculate embedding if profile fields changed
     if any(field in update_data for field in ['headline', 'skills', 'preferred_locations', 'seniority']):
@@ -81,6 +88,8 @@ async def update_user_profile(
     db: AsyncSession = Depends(get_db)
 ):
     """Update user profile by ID (users can only update their own profile)"""
+    from sqlalchemy.orm.attributes import flag_modified
+
     # Ensure users can only update their own profile
     if current_user.id != user_id:
         raise HTTPException(
@@ -90,8 +99,20 @@ async def update_user_profile(
 
     update_data = user_update.model_dump(exclude_unset=True)
 
+    # Debug: log what we're updating
+    print(f"User update request - user_id: {user_id}")
+    print(f"Update data fields: {list(update_data.keys())}")
+    if 'skills' in update_data:
+        print(f"Skills being updated: {update_data['skills']}")
+
+    # JSON/array columns that need explicit flagging for SQLAlchemy to detect changes
+    json_fields = {'skills', 'experience', 'education', 'preferred_locations'}
+
     for field, value in update_data.items():
         setattr(current_user, field, value)
+        # Flag JSON columns as modified so SQLAlchemy includes them in UPDATE
+        if field in json_fields:
+            flag_modified(current_user, field)
 
     # Recalculate embedding if profile fields changed
     if any(field in update_data for field in ['headline', 'skills', 'preferred_locations', 'seniority']):
