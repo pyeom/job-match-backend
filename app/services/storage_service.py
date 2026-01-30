@@ -15,8 +15,8 @@ class StorageService:
     """Service for storing and managing uploaded files."""
 
     def __init__(self):
-        # Base directory for media storage
-        self.base_dir = Path("media")
+        # Base directory for file uploads storage
+        self.base_dir = Path("uploads")
         self.avatars_dir = self.base_dir / "avatars"
         self.documents_dir = self.base_dir / "documents"
 
@@ -236,7 +236,7 @@ class StorageService:
             await f.write(file_content)
 
         # Generate storage path (relative path for database storage)
-        storage_path = f"media/documents/{user_id}/{filename}"
+        storage_path = f"uploads/documents/{user_id}/{filename}"
 
         return storage_path, file_path
 
@@ -310,7 +310,7 @@ class StorageService:
         Extract the filename from a storage path.
 
         Args:
-            storage_path: The storage path (e.g., "media/documents/{user_id}/{filename}")
+            storage_path: The storage path (e.g., "uploads/documents/{user_id}/{filename}")
 
         Returns:
             The filename or None if path is invalid
@@ -356,7 +356,7 @@ class StorageService:
         Read a file from storage path.
 
         Args:
-            storage_path: The storage path (e.g., "media/documents/{user_id}/{filename}")
+            storage_path: The storage path (e.g., "uploads/documents/{user_id}/{filename}")
 
         Returns:
             File content as bytes or None if file doesn't exist

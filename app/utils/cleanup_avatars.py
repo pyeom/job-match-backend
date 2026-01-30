@@ -26,7 +26,7 @@ async def cleanup_orphaned_avatars():
     users_cleaned = 0
     files_deleted = 0
 
-    avatars_dir = Path("media") / "avatars"
+    avatars_dir = Path("uploads") / "avatars"
 
     if not avatars_dir.exists():
         print("No avatars directory found")
