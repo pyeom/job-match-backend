@@ -36,7 +36,7 @@ class Document(Base):
 
     # Storage
     storage_path = Column(String(500), nullable=False)
-    # Relative path: media/documents/{user_id}/{filename}
+    # Relative path: uploads/documents/{user_id}/{filename}
 
     # Optional extracted text for search/parsing
     extracted_text = Column(Text, nullable=True)

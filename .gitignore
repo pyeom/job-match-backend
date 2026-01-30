@@ -10,7 +10,8 @@
 *.pyd
 .Python
 db.sqlite3
-media/
+!app/api/v1/media/
+uploads/
 staticfiles/
 .idea/
 .vscode/
