@@ -9,20 +9,50 @@ logger = logging.getLogger(__name__)
 
 class EmbeddingService:
     """Service for generating embeddings using sentence-transformers"""
-    
+
     def __init__(self):
-        self.model = None
-        self._load_model()
-    
+        self._model = None
+        self._load_attempted = False
+        self._load_error = None
+
+    @property
+    def model(self):
+        """Lazy load the model on first access"""
+        if self._model is None and not self._load_attempted:
+            self._load_model()
+        if self._model is None:
+            raise RuntimeError(
+                f"Embedding model not available. {self._load_error or 'Model not loaded.'} "
+                "Call /api/v1/health/embeddings to check status or retry loading."
+            )
+        return self._model
+
+    @property
+    def is_available(self) -> bool:
+        """Check if the embedding model is loaded and available"""
+        if self._model is not None:
+            return True
+        if not self._load_attempted:
+            self._load_model()
+        return self._model is not None
+
     def _load_model(self):
         """Load the sentence transformer model"""
+        self._load_attempted = True
         try:
             logger.info(f"Loading embedding model: {settings.embedding_model}")
-            self.model = SentenceTransformer(settings.embedding_model)
+            self._model = SentenceTransformer(settings.embedding_model)
+            self._load_error = None
             logger.info("Embedding model loaded successfully")
         except Exception as e:
+            self._load_error = str(e)
             logger.error(f"Failed to load embedding model: {e}")
-            raise
+
+    def retry_load(self) -> bool:
+        """Retry loading the model. Returns True if successful."""
+        self._load_attempted = False
+        self._load_model()
+        return self._model is not None
     
     async def generate_job_embedding(self, job_text: str) -> List[float]:
         """Generate embedding for a job posting from combined text
