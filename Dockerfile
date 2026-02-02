@@ -27,11 +27,20 @@ COPY alembic.ini .
 COPY migrations ./migrations
 COPY scripts ./scripts
 
-# Create non-root user for security and set permissions
+# Create non-root user for security and set up cache directories
 RUN useradd -m runner && \
-    chown -R runner:runner /app && \
+    mkdir -p /home/runner/.cache/huggingface && \
+    chown -R runner:runner /app /home/runner/.cache && \
     chmod +x /app/scripts/*.sh /app/scripts/*.py
+
+# Set HuggingFace cache environment variables
+ENV HF_HOME=/home/runner/.cache/huggingface
+ENV TRANSFORMERS_CACHE=/home/runner/.cache/huggingface
+ENV SENTENCE_TRANSFORMERS_HOME=/home/runner/.cache/huggingface
+
+# Pre-download the embedding model during build (as runner user)
 USER runner
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
 
 # Expose port
 EXPOSE 8000

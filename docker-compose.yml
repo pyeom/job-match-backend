@@ -43,6 +43,7 @@ services:
     volumes:
       - .:/app
       - ./uploads:/app/uploads
+      - hf_cache:/home/runner/.cache/huggingface
     ports:
       - "8000:8000"
     env_file:
@@ -54,10 +55,20 @@ services:
       POSTGRES_HOST: db
       POSTGRES_PORT: 5432
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      HF_HOME: /home/runner/.cache/huggingface
+      TRANSFORMERS_CACHE: /home/runner/.cache/huggingface
+      SENTENCE_TRANSFORMERS_HOME: /home/runner/.cache/huggingface
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 30s
+      start_period: 60s
+      retries: 3
     depends_on:
       db:
         condition: service_healthy
 
 volumes:
   postgres_data:
+  hf_cache:
