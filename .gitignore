@@ -12,6 +12,7 @@
 db.sqlite3
 !app/api/v1/media/
 uploads/
+model-cache/
 staticfiles/
 .idea/
 .vscode/
