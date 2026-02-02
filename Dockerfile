@@ -38,9 +38,13 @@ ENV HF_HOME=/home/runner/.cache/huggingface
 ENV TRANSFORMERS_CACHE=/home/runner/.cache/huggingface
 ENV SENTENCE_TRANSFORMERS_HOME=/home/runner/.cache/huggingface
 
-# Pre-download the embedding model during build (as runner user)
+# Switch to runner user
 USER runner
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')"
+
+# Try to pre-download the embedding model (non-fatal if it fails)
+# If this fails, copy the model manually to the hf_cache volume
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')" \
+    || echo "WARNING: Model download failed. Copy model files manually to hf_cache volume."
 
 # Expose port
 EXPOSE 8000

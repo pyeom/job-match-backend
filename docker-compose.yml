@@ -43,7 +43,7 @@ services:
     volumes:
       - .:/app
       - ./uploads:/app/uploads
-      - hf_cache:/home/runner/.cache/huggingface
+      - ./model-cache:/home/runner/.cache/huggingface
     ports:
       - "8000:8000"
     env_file:
@@ -71,4 +71,3 @@ services:
 
 volumes:
   postgres_data:
-  hf_cache:
