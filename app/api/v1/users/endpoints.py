@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
+from app.core.security import verify_password, get_password_hash
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.schemas.user import User as UserSchema, UserUpdate
+from app.schemas.user import User as UserSchema, UserUpdate, PasswordChange, PasswordChangeResponse
 from app.services.embedding_service import embedding_service
 import uuid
 
@@ -131,3 +132,53 @@ async def update_user_profile(
     await db.refresh(current_user)
 
     return current_user
+
+
+@router.post("/{user_id}/change-password", response_model=PasswordChangeResponse)
+async def change_password(
+    user_id: uuid.UUID,
+    password_data: PasswordChange,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Change the user's password.
+
+    Users can only change their own password.
+    Requires the current password for verification and a new password
+    that meets the following requirements:
+    - At least 8 characters long
+    - Contains at least one uppercase letter
+    - Contains at least one lowercase letter
+    - Contains at least one number
+    """
+    # Ensure users can only change their own password
+    if current_user.id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only change your own password"
+        )
+
+    # Verify current password
+    if not verify_password(password_data.current_password, current_user.password_hash):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect"
+        )
+
+    # Ensure new password is different from current
+    if password_data.current_password == password_data.new_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="New password must be different from current password"
+        )
+
+    # Hash and update the new password
+    current_user.password_hash = get_password_hash(password_data.new_password)
+
+    await db.commit()
+
+    return PasswordChangeResponse(
+        message="Password changed successfully",
+        detail="Your password has been updated. Please use your new password for future logins."
+    )

@@ -90,3 +90,29 @@ class UserProfile(User):
     """Extended user profile with additional stats"""
     application_count: Optional[int] = None
     swipe_count: Optional[int] = None
+
+
+class PasswordChange(BaseModel):
+    """Schema for changing password"""
+    current_password: str
+    new_password: str
+
+    @field_validator('new_password')
+    @classmethod
+    def validate_new_password(cls, v):
+        """Validate new password meets requirements"""
+        if len(v) < 8:
+            raise ValueError('Password must be at least 8 characters long')
+        if not any(c.isupper() for c in v):
+            raise ValueError('Password must contain at least one uppercase letter')
+        if not any(c.islower() for c in v):
+            raise ValueError('Password must contain at least one lowercase letter')
+        if not any(c.isdigit() for c in v):
+            raise ValueError('Password must contain at least one number')
+        return v
+
+
+class PasswordChangeResponse(BaseModel):
+    """Response schema for password change"""
+    message: str
+    detail: Optional[str] = None
