@@ -12,6 +12,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 import math
+from datetime import datetime
 
 from app.models.notification import NotificationType
 from app.models.application import Application
@@ -218,7 +219,7 @@ class NotificationService:
             await db.commit()
         """
         try:
-            notification = await self.notification_repo.get(db, notification_id)
+            notification = await self.notification_repo.get_with_relations(db, notification_id)
             if not notification:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -232,8 +233,12 @@ class NotificationService:
                     detail="Access denied. You can only mark your own notifications as read"
                 )
 
-            updated = await self.notification_repo.mark_as_read(db, notification_id)
-            return updated
+            if not notification.is_read:
+                notification.is_read = True
+                notification.read_at = datetime.utcnow()
+                await db.flush()
+
+            return notification
 
         except HTTPException:
             raise
@@ -265,7 +270,7 @@ class NotificationService:
             HTTPException: 404 if not found, 403 if unauthorized
         """
         try:
-            notification = await self.notification_repo.get(db, notification_id)
+            notification = await self.notification_repo.get_with_relations(db, notification_id)
             if not notification:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -279,8 +284,12 @@ class NotificationService:
                     detail="Access denied. You can only mark your company's notifications as read"
                 )
 
-            updated = await self.notification_repo.mark_as_read(db, notification_id)
-            return updated
+            if not notification.is_read:
+                notification.is_read = True
+                notification.read_at = datetime.utcnow()
+                await db.flush()
+
+            return notification
 
         except HTTPException:
             raise

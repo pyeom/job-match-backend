@@ -139,6 +139,19 @@ async def mark_notification_read(
     return _enrich_notification(notification)
 
 
+@router.get("/unread-count")
+async def get_unread_count(
+    current_user: User = Depends(get_job_seeker),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get the unread notification count for the current user.
+    """
+    service = NotificationService()
+    count = await service.notification_repo.get_unread_count_for_user(db, current_user.id)
+    return {"unread_count": count}
+
+
 @router.patch("/read-all", response_model=MarkReadResponse)
 async def mark_all_notifications_read(
     current_user: User = Depends(get_job_seeker),

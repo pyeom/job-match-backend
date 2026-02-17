@@ -204,6 +204,37 @@ class NotificationRepository(BaseRepository[Notification]):
             logger.error(f"Error fetching notifications for company {company_id}: {e}")
             raise
 
+    async def get_with_relations(
+        self,
+        db: AsyncSession,
+        notification_id: UUID
+    ) -> Optional[Notification]:
+        """
+        Retrieve a notification by ID with job, company, and user relations eagerly loaded.
+
+        Args:
+            db: Active database session
+            notification_id: UUID of the notification
+
+        Returns:
+            Notification with relations loaded, or None if not found
+        """
+        try:
+            stmt = (
+                select(Notification)
+                .where(Notification.id == notification_id)
+                .options(
+                    joinedload(Notification.job).joinedload(Job.company),
+                    joinedload(Notification.application),
+                    joinedload(Notification.user),
+                )
+            )
+            result = await db.execute(stmt)
+            return result.unique().scalar_one_or_none()
+        except SQLAlchemyError as e:
+            logger.error(f"Error fetching notification {notification_id} with relations: {e}")
+            raise
+
     async def mark_as_read(
         self,
         db: AsyncSession,
@@ -217,7 +248,7 @@ class NotificationRepository(BaseRepository[Notification]):
             notification_id: UUID of the notification
 
         Returns:
-            Updated notification or None if not found
+            Updated notification with relations loaded, or None if not found
 
         Example:
             notification = await repo.mark_as_read(db, notification_id)
@@ -225,12 +256,11 @@ class NotificationRepository(BaseRepository[Notification]):
                 await db.commit()
         """
         try:
-            notification = await self.get(db, notification_id)
+            notification = await self.get_with_relations(db, notification_id)
             if notification and not notification.is_read:
                 notification.is_read = True
                 notification.read_at = datetime.utcnow()
                 await db.flush()
-                await db.refresh(notification)
 
             return notification
 
