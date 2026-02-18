@@ -45,17 +45,20 @@ async def update_current_user_legacy(
             flag_modified(current_user, field)
 
     # Recalculate embedding if profile fields changed
-    if any(field in update_data for field in ['headline', 'skills', 'preferred_locations', 'seniority']):
+    if any(field in update_data for field in ['headline', 'skills', 'preferred_locations', 'seniority', 'bio', 'experience', 'education']):
         try:
             profile_embedding = embedding_service.generate_user_embedding(
                 headline=current_user.headline,
                 skills=current_user.skills,
-                preferences=current_user.preferred_locations
+                preferences=current_user.preferred_locations,
+                bio=current_user.bio,
+                experience_text=embedding_service.build_experience_summary(current_user.experience or []),
+                education_text=embedding_service.build_education_summary(current_user.education or [])
             )
             current_user.profile_embedding = profile_embedding
         except Exception as e:
-            # Log error but don't fail update
-            print(f"Failed to regenerate profile embedding for user {current_user.id}: {e}")
+            import logging
+            logging.getLogger(__name__).error(f"Failed to regenerate profile embedding for user {current_user.id}: {e}")
 
     await db.commit()
     await db.refresh(current_user)
@@ -116,17 +119,20 @@ async def update_user_profile(
             flag_modified(current_user, field)
 
     # Recalculate embedding if profile fields changed
-    if any(field in update_data for field in ['headline', 'skills', 'preferred_locations', 'seniority']):
+    if any(field in update_data for field in ['headline', 'skills', 'preferred_locations', 'seniority', 'bio', 'experience', 'education']):
         try:
             profile_embedding = embedding_service.generate_user_embedding(
                 headline=current_user.headline,
                 skills=current_user.skills,
-                preferences=current_user.preferred_locations
+                preferences=current_user.preferred_locations,
+                bio=current_user.bio,
+                experience_text=embedding_service.build_experience_summary(current_user.experience or []),
+                education_text=embedding_service.build_education_summary(current_user.education or [])
             )
             current_user.profile_embedding = profile_embedding
         except Exception as e:
-            # Log error but don't fail update
-            print(f"Failed to regenerate profile embedding for user {current_user.id}: {e}")
+            import logging
+            logging.getLogger(__name__).error(f"Failed to regenerate profile embedding for user {current_user.id}: {e}")
 
     await db.commit()
     await db.refresh(current_user)

@@ -46,11 +46,19 @@ class ParsedEducation(BaseModel):
     description: Optional[str] = None
 
 
+class ParsedLanguageProficiency(BaseModel):
+    """Parsed language proficiency with optional CEFR level."""
+    language: str
+    level: str  # "Native", "Fluent", "Advanced", "Intermediate", "Basic", "Beginner"
+    cefr: Optional[str] = None  # "A1"-"C2" if determinable
+
+
 class ParsedSkills(BaseModel):
     """Parsed skills categorized by type."""
     technical_skills: List[str] = Field(default_factory=list)
     soft_skills: List[str] = Field(default_factory=list)
-    languages: List[str] = Field(default_factory=list)
+    languages: List[str] = Field(default_factory=list)  # kept for backward compat
+    language_proficiencies: List[ParsedLanguageProficiency] = Field(default_factory=list)
     certifications: List[str] = Field(default_factory=list)
     all_skills: List[str] = Field(default_factory=list)
 

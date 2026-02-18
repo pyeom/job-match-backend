@@ -172,7 +172,10 @@ async def _update_user_embedding_if_needed(user: User, db):
             user.profile_embedding = embedding_service.generate_user_embedding(
                 headline=user.headline,
                 skills=user.skills,
-                preferences=user.preferred_locations
+                preferences=user.preferred_locations,
+                bio=getattr(user, 'bio', None),
+                experience_text=embedding_service.build_experience_summary(getattr(user, 'experience', None) or []),
+                education_text=embedding_service.build_education_summary(getattr(user, 'education', None) or [])
             )
 
         # Update embedding combining profile with right swipe history

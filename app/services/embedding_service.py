@@ -112,34 +112,112 @@ class EmbeddingService:
             logger.error(f"Failed to generate job embedding: {e}")
             raise
     
-    def generate_user_embedding(self, headline: Optional[str] = None, skills: Optional[List[str]] = None, preferences: Optional[List[str]] = None) -> List[float]:
+    def build_experience_summary(self, experience: list) -> Optional[str]:
+        """Build a text summary from top 3 experiences.
+
+        Handles both dict (from DB JSON columns) and object (from parsed data) formats.
+        """
+        if not experience:
+            return None
+
+        parts = []
+        for exp in experience[:3]:
+            if isinstance(exp, dict):
+                title = exp.get("title", "")
+                company = exp.get("company", "")
+                desc = exp.get("description", "") or ""
+            else:
+                title = getattr(exp, "title", "")
+                company = getattr(exp, "company", "")
+                desc = getattr(exp, "description", "") or ""
+
+            entry = f"{title} at {company}"
+            if desc:
+                entry += f": {desc[:80]}"
+            parts.append(entry)
+
+        return "; ".join(parts) if parts else None
+
+    def build_education_summary(self, education: list) -> Optional[str]:
+        """Build a text summary from top 2 education entries.
+
+        Handles both dict (from DB JSON columns) and object (from parsed data) formats.
+        """
+        if not education:
+            return None
+
+        parts = []
+        for edu in education[:2]:
+            if isinstance(edu, dict):
+                degree = edu.get("degree", "")
+                field = edu.get("field_of_study", "")
+                institution = edu.get("institution", "")
+            else:
+                degree = getattr(edu, "degree", "")
+                field = getattr(edu, "field_of_study", "")
+                institution = getattr(edu, "institution", "")
+
+            entry_parts = [p for p in [degree, field] if p]
+            entry = " ".join(entry_parts)
+            if institution:
+                entry += f" at {institution}"
+            if entry.strip():
+                parts.append(entry.strip())
+
+        return "; ".join(parts) if parts else None
+
+    def generate_user_embedding(
+        self,
+        headline: Optional[str] = None,
+        skills: Optional[List[str]] = None,
+        preferences: Optional[List[str]] = None,
+        bio: Optional[str] = None,
+        experience_text: Optional[str] = None,
+        education_text: Optional[str] = None
+    ) -> List[float]:
         """Generate embedding for a user profile
-        
+
         Args:
             headline: User's professional headline
             skills: List of user skills
             preferences: List of job preferences/locations
-            
+            bio: User's bio/summary text
+            experience_text: Pre-built experience summary
+            education_text: Pre-built education summary
+
         Returns:
             List of float values representing the embedding
         """
         text_parts = []
-        
+
         if headline:
             text_parts.append(headline)
-        
+
+        if bio:
+            text_parts.append(bio[:150])
+
         if skills:
             text_parts.append(" ".join(skills))
-        
+
+        if experience_text:
+            text_parts.append(experience_text[:200])
+
+        if education_text:
+            text_parts.append(education_text[:100])
+
         if preferences:
             text_parts.append(" ".join(preferences))
-        
+
         if not text_parts:
             # Return a default/zero embedding if no profile data
             return [0.0] * 384  # Dimension for all-MiniLM-L6-v2
-        
+
         combined_text = " | ".join(text_parts)
-        
+        # Hard cap to stay within model's 256-token limit
+        combined_text = combined_text[:900]
+
+        logger.info(f"Generating user embedding from: {combined_text[:120]}...")
+
         try:
             embedding = self.model.encode(combined_text, convert_to_tensor=False)
             return embedding.tolist()

@@ -21,6 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Download SpaCy models (trf for production, sm as fallback)
+RUN python -m spacy download en_core_web_trf && \
+    python -m spacy download es_core_news_lg && \
+    python -m spacy download en_core_web_sm && \
+    python -m spacy download es_core_news_sm
+
 # Copy application code
 COPY app ./app
 COPY alembic.ini .
@@ -45,6 +51,10 @@ USER runner
 # If this fails, copy the model manually to the hf_cache volume
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')" \
     || echo "WARNING: Model download failed. Copy model files manually to hf_cache volume."
+
+# Build ESCO skill index (non-fatal if it fails)
+RUN python scripts/build_esco_index.py \
+    || echo "WARNING: ESCO index build failed. Skill matching will use fallback."
 
 # Expose port
 EXPOSE 8000

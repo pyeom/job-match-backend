@@ -25,7 +25,13 @@ class Settings(BaseSettings):
     access_token_expires: int = Field(default=900, env="ACCESS_TOKEN_EXPIRES")  # 15 minutes
     refresh_token_expires: int = Field(default=604800, env="REFRESH_TOKEN_EXPIRES")  # 7 days
     embedding_model: str = Field(default="all-MiniLM-L6-v2", env="EMBEDDING_MODEL")
-    
+
+    # NLP / Resume parsing
+    spacy_model_en: str = Field(default="en_core_web_trf", env="SPACY_MODEL_EN")
+    spacy_model_es: str = Field(default="es_core_news_lg", env="SPACY_MODEL_ES")
+    esco_skill_similarity_threshold: float = Field(default=0.75, env="ESCO_SKILL_THRESHOLD")
+    esco_index_path: str = Field(default="app/data/esco/skills_index.pkl", env="ESCO_INDEX_PATH")
+
     @property
     def database_url(self) -> str:
         return f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
