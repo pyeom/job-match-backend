@@ -25,8 +25,8 @@ class UserService:
         """
         Update user profile with parsed resume data.
 
-        Only updates fields that are currently empty to avoid overwriting
-        user-provided data.
+        Overwrites existing fields with new resume data when parsed values
+        are non-empty, allowing users to re-upload resumes.
 
         Args:
             db: Database session
@@ -39,41 +39,31 @@ class UserService:
         fields_updated = []
         update_dict = {}
 
-        # Update contact information (only if empty)
-        if parsed_data.contact.full_name and not user.full_name:
+        # Update contact information
+        if parsed_data.contact.full_name:
             update_dict["full_name"] = parsed_data.contact.full_name
             fields_updated.append("full_name")
 
-        if parsed_data.contact.phone and not getattr(user, 'phone', None):
+        if parsed_data.contact.phone:
             update_dict["phone"] = parsed_data.contact.phone
             fields_updated.append("phone")
 
         # Update summary/headline
-        if parsed_data.summary.headline and not getattr(user, 'headline', None):
+        if parsed_data.summary.headline:
             update_dict["headline"] = parsed_data.summary.headline
             fields_updated.append("headline")
 
-        if parsed_data.summary.summary and not getattr(user, 'bio', None):
+        if parsed_data.summary.summary:
             update_dict["bio"] = parsed_data.summary.summary
             fields_updated.append("bio")
 
-        # Update skills
-        existing_skills = getattr(user, 'skills', None) or []
+        # Update skills — replace with parsed skills from new resume
         if parsed_data.skills.all_skills:
-            if not existing_skills:
-                update_dict["skills"] = parsed_data.skills.all_skills
-                fields_updated.append("skills")
-            else:
-                # Merge skills, avoiding duplicates
-                existing_set = {s.lower() for s in existing_skills}
-                new_skills = [s for s in parsed_data.skills.all_skills if s.lower() not in existing_set]
-                if new_skills:
-                    merged_skills = existing_skills + new_skills
-                    update_dict["skills"] = merged_skills[:50]  # Limit to 50 skills
-                    fields_updated.append("skills")
+            update_dict["skills"] = parsed_data.skills.all_skills[:50]
+            fields_updated.append("skills")
 
         # Update experience
-        if parsed_data.experience and not getattr(user, 'experience', None):
+        if parsed_data.experience:
             experience_list = []
             for exp in parsed_data.experience:
                 experience_list.append({
@@ -89,7 +79,7 @@ class UserService:
             fields_updated.append("experience")
 
         # Update education
-        if parsed_data.education and not getattr(user, 'education', None):
+        if parsed_data.education:
             education_list = []
             for edu in parsed_data.education:
                 education_list.append({
@@ -105,18 +95,17 @@ class UserService:
             fields_updated.append("education")
 
         # Infer seniority from experience
-        if not getattr(user, 'seniority', None) and parsed_data.experience:
+        if parsed_data.experience:
             seniority = self._infer_seniority(parsed_data)
             if seniority:
                 update_dict["seniority"] = seniority
                 fields_updated.append("seniority")
 
-        # Extract preferred locations from experience
-        if not getattr(user, 'preferred_locations', None):
-            locations = self._extract_locations(parsed_data)
-            if locations:
-                update_dict["preferred_locations"] = locations
-                fields_updated.append("preferred_locations")
+        # Extract preferred locations from new resume
+        locations = self._extract_locations(parsed_data)
+        if locations:
+            update_dict["preferred_locations"] = locations
+            fields_updated.append("preferred_locations")
 
         # Apply updates
         if update_dict:
@@ -130,12 +119,18 @@ class UserService:
                     # Generate profile embedding using existing embedding service
                     user_skills = getattr(user, 'skills', None) or []
                     user_headline = getattr(user, 'headline', None)
+                    user_bio = getattr(user, 'bio', None)
                     user_locations = getattr(user, 'preferred_locations', None) or []
+                    user_experience = getattr(user, 'experience', None) or []
+                    user_education = getattr(user, 'education', None) or []
 
                     embedding = embedding_service.generate_user_embedding(
                         headline=user_headline,
                         skills=user_skills,
-                        preferences=user_locations
+                        preferences=user_locations,
+                        bio=user_bio,
+                        experience_text=embedding_service.build_experience_summary(user_experience),
+                        education_text=embedding_service.build_education_summary(user_education)
                     )
 
                     if hasattr(user, 'profile_embedding'):
