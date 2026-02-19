@@ -65,6 +65,7 @@ class Application(BaseModel):
     job_id: uuid.UUID
     stage: ApplicationStage
     status: ApplicationStatus
+    stage_history: Optional[List[dict]] = None
     stage_updated_at: datetime
     rejection_reason: Optional[str]
     cover_letter: Optional[str]
