@@ -455,24 +455,26 @@ class NotificationService:
             except Exception as ws_error:
                 logger.error(f"[NotificationService] Failed to send WebSocket notification to user {application.user_id}: {ws_error}", exc_info=True)
 
-            # Send push notification
+            # Enqueue push notification (avoids blocking request thread on Expo API)
             try:
-                await self.push_service.send_to_user(
-                    db=db,
-                    user_id=application.user_id,
-                    title=notification_data["title"],
-                    body=message,
-                    data={
+                from app.core.arq import get_arq_pool
+                arq = await get_arq_pool()
+                await arq.enqueue_job(
+                    "deliver_push_notification",
+                    "user",
+                    str(application.user_id),
+                    notification_data["title"],
+                    message,
+                    {
                         "notification_id": str(notification.id),
                         "job_id": str(job.id) if job else None,
                         "application_id": str(application.id),
-                        "type": notification_data["type"].value
+                        "type": notification_data["type"].value,
                     },
-                    priority="high"
                 )
-                logger.debug(f"Sent push notification to user {application.user_id}")
+                logger.debug(f"Enqueued push notification for user {application.user_id}")
             except Exception as push_error:
-                logger.warning(f"Failed to send push notification: {push_error}")
+                logger.warning(f"Failed to enqueue push notification for user: {push_error}")
 
             return notification
 
@@ -580,24 +582,26 @@ class NotificationService:
             except Exception as ws_error:
                 logger.error(f"[NotificationService] Failed to send WebSocket notification to company {job.company_id}: {ws_error}", exc_info=True)
 
-            # Send push notification to company
+            # Enqueue push notification to company (avoids blocking request thread on Expo API)
             try:
-                await self.push_service.send_to_company(
-                    db=db,
-                    company_id=job.company_id,
-                    title=notification_data["title"],
-                    body=message,
-                    data={
+                from app.core.arq import get_arq_pool
+                arq = await get_arq_pool()
+                await arq.enqueue_job(
+                    "deliver_push_notification",
+                    "company",
+                    str(job.company_id),
+                    notification_data["title"],
+                    message,
+                    {
                         "notification_id": str(notification.id),
                         "job_id": str(job.id),
                         "application_id": str(application.id),
-                        "type": notification_data["type"].value
+                        "type": notification_data["type"].value,
                     },
-                    priority="high"
                 )
-                logger.debug(f"Sent push notification to company {job.company_id}")
+                logger.debug(f"Enqueued push notification for company {job.company_id}")
             except Exception as push_error:
-                logger.warning(f"Failed to send push notification to company: {push_error}")
+                logger.warning(f"Failed to enqueue push notification for company: {push_error}")
 
             return notification
 

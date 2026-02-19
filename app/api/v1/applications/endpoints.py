@@ -32,7 +32,8 @@ async def get_user_applications(
     result = await db.execute(
         select(Application)
         .options(
-            selectinload(Application.job).selectinload(Job.company)
+            selectinload(Application.job).selectinload(Job.company),
+            selectinload(Application.user),
         )
         .where(Application.user_id == user_id)
         .order_by(Application.created_at.desc())
@@ -60,7 +61,8 @@ async def get_user_application(
     result = await db.execute(
         select(Application)
         .options(
-            selectinload(Application.job).selectinload(Job.company)
+            selectinload(Application.job).selectinload(Job.company),
+            selectinload(Application.user),
         )
         .where(
             Application.id == application_id,
@@ -124,7 +126,8 @@ async def get_current_user_applications_legacy(
     result = await db.execute(
         select(Application)
         .options(
-            selectinload(Application.job).selectinload(Job.company)
+            selectinload(Application.job).selectinload(Job.company),
+            selectinload(Application.user),
         )
         .where(Application.user_id == current_user.id)
         .order_by(Application.created_at.desc())
@@ -147,7 +150,8 @@ async def get_application_legacy(
     result = await db.execute(
         select(Application)
         .options(
-            selectinload(Application.job).selectinload(Job.company)
+            selectinload(Application.job).selectinload(Job.company),
+            selectinload(Application.user),
         )
         .where(
             Application.id == application_id,

@@ -1,3 +1,6 @@
+import asyncio
+from functools import partial
+
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from typing import List, Optional
@@ -64,7 +67,8 @@ class EmbeddingService:
             List of float values representing the embedding
         """
         try:
-            embedding = self.model.encode(job_text, convert_to_tensor=False)
+            fn = partial(self.model.encode, job_text, convert_to_tensor=False)
+            embedding = await asyncio.to_thread(fn)
             return embedding.tolist()
         except Exception as e:
             logger.error(f"Failed to generate job embedding: {e}")

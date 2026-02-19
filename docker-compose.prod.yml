@@ -1,4 +1,16 @@
 ---
+# Production docker-compose.
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Key differences from docker-compose.yml (dev):
+#   - Source code is NOT bind-mounted (.:/app removed). Code is baked into the image.
+#   - Uses a versioned registry image instead of building from source.
+#   - PostgreSQL and Redis ports are NOT exposed outside the Docker network.
+#   - APP_ENV=production is explicitly set (triggers env-var validators in config.py).
+#   - --reload is not used (start.sh omits it when APP_ENV=production).
+#   - Named Docker volumes are used for uploads and model cache.
 
 services:
   db:
@@ -13,35 +25,18 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
-    ports:
-      - "5432:5432"
+    # Intentionally no ports: — PostgreSQL must NOT be reachable outside the Docker network in production.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # migrations:
-  #   build: .
-  #   command: alembic upgrade head
-  #   container_name: migrations-jobmatch
-  #   env_file:
-  #     - .env
-  #   environment:
-  #     DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-  #   volumes:
-  #     - .:/app
-  #   depends_on:
-  #     db:
-  #       condition: service_healthy
-  #   restart: "no"
-
   redis:
     image: redis:7-alpine
     container_name: redis-jobmatch
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:6379:6379"
+    # Intentionally no ports: — Redis must NOT be reachable outside the Docker network in production.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -49,24 +44,21 @@ services:
       retries: 5
 
   backend:
-    build:
-      context: .
-      args:
-        SPACY_MODEL_EN: ${SPACY_MODEL_EN:-en_core_web_sm}
-        SPACY_MODEL_ES: ${SPACY_MODEL_ES:-es_core_news_sm}
-    image: job-match-backend
-    command: bash scripts/start.sh
+    image: ${REGISTRY:-ghcr.io/yourorg/job-match-backend}:${VERSION:-latest}
     container_name: backend-jobmatch
+    command: bash scripts/start.sh
     volumes:
-      - .:/app
-      - ./uploads:/app/uploads
-      - ./model-cache:/home/runner/.cache/huggingface
+      # NO .:/app source code bind mount — application code is baked into the image.
+      # Named volumes only: persistent data that must survive container recreation.
+      - uploads_data:/app/uploads
+      - model_cache:/home/runner/.cache/huggingface
       - esco_cache:/app/app/data/esco
     ports:
       - "8000:8000"
     env_file:
       - .env
     environment:
+      APP_ENV: production
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
@@ -82,7 +74,7 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 30s
       timeout: 30s
-      start_period: 60s
+      start_period: 90s
       retries: 3
     depends_on:
       db:
@@ -91,17 +83,18 @@ services:
         condition: service_healthy
 
   worker:
-    image: job-match-backend
-    command: arq app.tasks.worker.WorkerSettings
+    image: ${REGISTRY:-ghcr.io/yourorg/job-match-backend}:${VERSION:-latest}
     container_name: worker-jobmatch
+    command: arq app.tasks.worker.WorkerSettings
     volumes:
-      - .:/app
-      - ./uploads:/app/uploads
-      - ./model-cache:/home/runner/.cache/huggingface
+      # NO .:/app source code bind mount — application code is baked into the image.
+      - uploads_data:/app/uploads
+      - model_cache:/home/runner/.cache/huggingface
       - esco_cache:/app/app/data/esco
     env_file:
       - .env
     environment:
+      APP_ENV: production
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
@@ -121,4 +114,6 @@ services:
 
 volumes:
   postgres_data:
+  uploads_data:
+  model_cache:
   esco_cache:

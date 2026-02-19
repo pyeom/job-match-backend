@@ -12,6 +12,7 @@ from app.api.deps import (
 from app.models.user import User
 from app.models.company import Company
 from app.models.job import Job
+from app.core.cache import get_cached_company, set_cached_company, invalidate_company_cache
 from app.schemas.company import (
     Company as CompanySchema,
     CompanyPublic,
@@ -55,6 +56,10 @@ async def get_company_public(
     db: AsyncSession = Depends(get_db)
 ):
     """Get public company information by ID (no authentication required)"""
+    cached = await get_cached_company(str(company_id))
+    if cached is not None:
+        return cached
+
     result = await db.execute(
         select(Company).where(
             and_(
@@ -68,6 +73,7 @@ async def get_company_public(
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
 
+    await set_cached_company(str(company_id), company)
     return company
 
 
@@ -78,6 +84,10 @@ async def get_company_details(
     db: AsyncSession = Depends(get_db)
 ):
     """Get company information by ID - available to all authenticated users"""
+    cached = await get_cached_company(str(company_id))
+    if cached is not None:
+        return cached
+
     result = await db.execute(
         select(Company).where(
             and_(
@@ -91,6 +101,7 @@ async def get_company_details(
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
 
+    await set_cached_company(str(company_id), company)
     return company
 
 
@@ -184,6 +195,7 @@ async def update_company(
 
     await db.commit()
     await db.refresh(company)
+    await invalidate_company_cache(str(company_id))
 
     return company
 
@@ -248,6 +260,7 @@ async def update_my_company_legacy(
 
     await db.commit()
     await db.refresh(company)
+    await invalidate_company_cache(str(current_user.company_id))
 
     return company
 

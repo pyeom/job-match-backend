@@ -30,6 +30,11 @@ scikit-learn>=1.3.0
 torch>=2.0.0
 transformers>=4.21.0
 
+# Redis
+redis[asyncio]>=5.0.0
+hiredis>=2.3.0
+arq>=0.25.0
+
 # Utility libraries
 requests>=2.28.0
 httpx>=0.24.0
@@ -46,5 +51,7 @@ python-magic>=0.4.27
 
 # NLP and Resume Parsing
 spacy>=3.7.0
-spacy-transformers>=1.3.0
+# spacy-transformers is only needed for TRF/LG SpaCy models (en_core_web_trf, es_core_news_lg).
+# It is installed conditionally in the Dockerfile based on the SPACY_MODEL_* build args.
+# Do not add it here — it pulls in the full CUDA torch when pip resolves the dependency tree.
 langdetect>=1.0.9

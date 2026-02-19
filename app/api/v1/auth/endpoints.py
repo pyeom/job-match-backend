@@ -198,7 +198,7 @@ async def refresh_access_token(
     refresh_token = refresh_request.refresh_token
 
     # Verify refresh token format and signature
-    user_id = verify_token(refresh_token, "refresh")
+    user_id = await verify_token(refresh_token, "refresh")
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -231,7 +231,7 @@ async def refresh_access_token(
         )
 
     # Blacklist the old refresh token to prevent reuse
-    blacklist_token(refresh_token)
+    await blacklist_token(refresh_token)
 
     # Create new tokens with rotation
     access_token = create_access_token(data={"sub": str(user.id)})
@@ -283,7 +283,7 @@ async def logout(
         access_token = auth_header[7:]  # Remove "Bearer " prefix
 
         # Blacklist the access token to prevent immediate reuse
-        blacklist_token(access_token)
+        await blacklist_token(access_token)
 
     return LogoutResponse(
         message="Successfully logged out",
