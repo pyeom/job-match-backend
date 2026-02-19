@@ -7,6 +7,7 @@ from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.schemas.avatar import AvatarUploadResponse, AvatarDeleteResponse
+from app.core.cache import invalidate_user_cache
 from app.services.image_service import image_service
 from app.services.storage_service import storage_service
 from app.services.rate_limit_service import rate_limit_service
@@ -94,13 +95,17 @@ async def upload_avatar(
             detail=f"Failed to save avatar: {str(e)}"
         )
 
-    # Update user record in database
-    current_user.avatar_url = avatar_url
-    current_user.avatar_thumbnail_url = thumbnail_url
+    # Re-fetch from DB so the mutation is tracked by the session
+    user = await db.get(User, current_user.id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    user.avatar_url = avatar_url
+    user.avatar_thumbnail_url = thumbnail_url
 
     try:
         await db.commit()
-        await db.refresh(current_user)
+        await db.refresh(user)
     except Exception as e:
         # Rollback database changes
         await db.rollback()
@@ -118,6 +123,8 @@ async def upload_avatar(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update user record: {str(e)}"
         )
+
+    await invalidate_user_cache(str(current_user.id))
 
     # Record successful request for rate limiting
     rate_limit_service.record_request(current_user.id)
@@ -163,19 +170,25 @@ async def delete_avatar(
             if success:
                 deleted_files.append("thumbnail")
 
-    # Update user record
-    current_user.avatar_url = None
-    current_user.avatar_thumbnail_url = None
+    # Re-fetch from DB so the mutation is tracked by the session
+    user = await db.get(User, current_user.id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    user.avatar_url = None
+    user.avatar_thumbnail_url = None
 
     try:
         await db.commit()
-        await db.refresh(current_user)
+        await db.refresh(user)
     except Exception as e:
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update user record: {str(e)}"
         )
+
+    await invalidate_user_cache(str(current_user.id))
 
     return AvatarDeleteResponse(
         message=f"Avatar deleted successfully ({', '.join(deleted_files)} removed)"

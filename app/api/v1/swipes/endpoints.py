@@ -20,6 +20,7 @@ from app.schemas.swipe import (
 )
 from app.schemas.job import JobWithCompany
 from app.services.swipe_service import SwipeService
+from app.core.arq import get_arq_pool
 import base64
 import json
 from datetime import datetime
@@ -56,24 +57,24 @@ async def create_swipe(
     ))
     existing_swipe = result.scalar_one_or_none()
 
+    application = None
+
     if existing_swipe:
-        # Update existing swipe
+        # Update existing swipe direction
         existing_swipe.direction = swipe_data.direction
-        await db.commit()
-        await db.refresh(existing_swipe)
+        await db.flush()
         swipe = existing_swipe
     else:
-        # Create new swipe
+        # Stage new swipe (no commit yet)
         swipe = Swipe(
             user_id=current_user.id,
             job_id=swipe_data.job_id,
             direction=swipe_data.direction
         )
         db.add(swipe)
-        await db.commit()
-        await db.refresh(swipe)
+        await db.flush()  # assigns swipe.id without committing
 
-    # If RIGHT swipe, create or update application and potentially update user embedding
+    # If RIGHT swipe, stage application in the same transaction
     if swipe_data.direction == "RIGHT":
         result = await db.execute(select(Application).where(
             Application.user_id == current_user.id,
@@ -82,9 +83,8 @@ async def create_swipe(
         existing_application = result.scalar_one_or_none()
 
         if not existing_application:
-            # Use score from discover feed (already calculated and sent to frontend)
             score = swipe_data.score
-            logger.info(f"Saving application with score {score} for user {current_user.id} on job {job.id}")
+            logger.info(f"Staging application with score {score} for user {current_user.id} on job {job.id}")
 
             application = Application(
                 user_id=current_user.id,
@@ -93,106 +93,56 @@ async def create_swipe(
                 score=score
             )
             db.add(application)
-            await db.commit()
-            await db.refresh(application)
+            await db.flush()  # assigns application.id without committing
 
-            logger.info(f"Created new application {application.id} for user {current_user.id} on job {swipe_data.job_id}")
+    # Single atomic commit covering swipe + application
+    await db.commit()
+    await db.refresh(swipe)
 
-            # Create notification for the company about new application
+    if application is not None:
+        logger.info(f"Created new application {application.id} for user {current_user.id} on job {swipe_data.job_id}")
+
+        # Notify the company about the new application (best-effort, after commit)
+        try:
+            from app.services.notification_service import NotificationService
+
+            logger.info(f"Attempting to create notification for application {application.id}")
+            notification_service = NotificationService()
+            notification = await notification_service.create_new_application_notification(db, application.id)
+
+            if notification:
+                await db.commit()
+                logger.info(f"Successfully created notification {notification.id} for application {application.id}")
+            else:
+                logger.warning(f"Notification service returned None for application {application.id}")
+
+        except Exception as e:
+            logger.error(f"Failed to create notification for application {application.id}: {e}", exc_info=True)
+            await db.rollback()
+
+    # Enqueue user embedding update (threshold check done inside the task)
+    if swipe_data.direction == "RIGHT":
+        if await _should_update_embedding(current_user.id, db):
             try:
-                from app.services.notification_service import NotificationService
-
-                logger.info(f"Attempting to create notification for application {application.id}")
-                notification_service = NotificationService()
-                notification = await notification_service.create_new_application_notification(db, application.id)
-
-                if notification:
-                    await db.commit()
-                    logger.info(f"Successfully created notification {notification.id} for application {application.id}")
-                else:
-                    logger.warning(f"Notification service returned None for application {application.id}")
-
+                arq = await get_arq_pool()
+                await arq.enqueue_job("update_user_embedding", str(current_user.id))
             except Exception as e:
-                logger.error(f"Failed to create notification for application {application.id}: {e}", exc_info=True)
-                # Don't fail the swipe if notification creation fails
-                # Rollback only the notification transaction, not the application
-                await db.rollback()
-
-        # Update user embedding based on right swipe history (as per CLAUDE.md)
-        await _update_user_embedding_if_needed(current_user, db)
+                logger.warning(f"Failed to enqueue embedding update for user {current_user.id}: {e}")
 
     return swipe
 
 
-async def _update_user_embedding_if_needed(user: User, db):
-    """Update user embedding based on right swipe history after threshold"""
-    from app.services.embedding_service import embedding_service
-
-    # Count user's active (non-undone) right swipes
+async def _should_update_embedding(user_id, db) -> bool:
+    """Return True when the right-swipe count crosses the update threshold."""
     result = await db.execute(
-        select(func.count(Swipe.id))
-        .where(
-            Swipe.user_id == user.id,
+        select(func.count(Swipe.id)).where(
+            Swipe.user_id == user_id,
             Swipe.direction == "RIGHT",
-            Swipe.is_undone == False
+            Swipe.is_undone == False,
         )
     )
-    right_swipe_count = result.scalar()
-
-    # Update embedding after 5 right swipes, then every 3 additional swipes
-    should_update = (
-        (right_swipe_count == 5) or  # First update after 5 swipes
-        (right_swipe_count > 5 and (right_swipe_count - 5) % 3 == 0)  # Every 3 swipes after
-    )
-
-    if not should_update:
-        return
-
-    try:
-        # Get jobs from recent active (non-undone) right swipes (limit to last 10 for performance)
-        result = await db.execute(
-            select(Job.job_embedding)
-            .join(Swipe, Job.id == Swipe.job_id)
-            .where(
-                Swipe.user_id == user.id,
-                Swipe.direction == "RIGHT",
-                Swipe.is_undone == False,
-                Job.job_embedding.isnot(None)
-            )
-            .order_by(Swipe.created_at.desc())
-            .limit(10)
-        )
-        job_embeddings = [row[0] for row in result.all()]
-
-        if not job_embeddings:
-            return
-
-        # Generate base embedding if user doesn't have one
-        if not user.profile_embedding:
-            user.profile_embedding = embedding_service.generate_user_embedding(
-                headline=user.headline,
-                skills=user.skills,
-                preferences=user.preferred_locations,
-                bio=getattr(user, 'bio', None),
-                experience_text=embedding_service.build_experience_summary(getattr(user, 'experience', None) or []),
-                education_text=embedding_service.build_education_summary(getattr(user, 'education', None) or [])
-            )
-
-        # Update embedding combining profile with right swipe history
-        updated_embedding = embedding_service.update_user_embedding_with_history(
-            base_embedding=user.profile_embedding,
-            liked_job_embeddings=job_embeddings,
-            alpha=0.3  # 30% profile, 70% history as per CLAUDE.md
-        )
-
-        user.profile_embedding = updated_embedding
-        await db.commit()
-
-        print(f"Updated user {user.id} embedding after {right_swipe_count} right swipes")
-
-    except Exception as e:
-        print(f"Failed to update user embedding for {user.id}: {e}")
-        # Don't fail the swipe if embedding update fails
+    count = result.scalar() or 0
+    return count == 5 or (count > 5 and (count - 5) % 3 == 0)
 
 
 def encode_rejected_cursor(created_at: datetime, swipe_id: str) -> str:
@@ -387,11 +337,16 @@ async def get_last_swipe(
     """
     swipe_service = SwipeService()
 
+    # Re-fetch user so service mutations are tracked by the session
+    user = await db.get(User, current_user.id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Reset daily counter if needed
-    await swipe_service.check_and_reset_daily_counter(db, current_user)
+    await swipe_service.check_and_reset_daily_counter(db, user)
 
     # Get last swipe with window info
-    result = await swipe_service.get_last_swipe_with_window(db, current_user)
+    result = await swipe_service.get_last_swipe_with_window(db, user)
 
     if not result:
         return None
@@ -399,7 +354,7 @@ async def get_last_swipe(
     swipe, remaining_time = result
 
     # Check if user can undo (considering daily limit)
-    can_undo, _ = await swipe_service.check_undo_eligibility(db, current_user, swipe)
+    can_undo, _ = await swipe_service.check_undo_eligibility(db, user, swipe)
 
     return SwipeWithUndoWindow(
         id=swipe.id,
@@ -452,16 +407,20 @@ async def undo_swipe(
 
     swipe_service = SwipeService()
 
+    # Re-fetch user so the daily_undo_count mutation is tracked by the session
+    user = await db.get(User, current_user.id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Undo the swipe
-    swipe = await swipe_service.undo_swipe(db, current_user, swipe_uuid)
+    swipe = await swipe_service.undo_swipe(db, user, swipe_uuid)
 
     # Commit transaction
     await db.commit()
     await db.refresh(swipe)
-    await db.refresh(current_user)
 
     # Get remaining undos
-    remaining = swipe_service.get_remaining_daily_undos(current_user)
+    remaining = swipe_service.get_remaining_daily_undos(user)
 
     return UndoResponse(
         message="Swipe undone successfully",
@@ -489,11 +448,16 @@ async def get_undo_limits(
     """
     swipe_service = SwipeService()
 
+    # Re-fetch user so the counter reset mutation is tracked by the session
+    user = await db.get(User, current_user.id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
     # Reset daily counter if needed
-    await swipe_service.check_and_reset_daily_counter(db, current_user)
+    await swipe_service.check_and_reset_daily_counter(db, user)
     await db.commit()
 
     # Get limit info
-    info = swipe_service.get_undo_limit_info(current_user)
+    info = swipe_service.get_undo_limit_info(user)
 
     return UndoLimitInfo(**info)

@@ -59,6 +59,15 @@ asyncio.run(verify())
 
 log "Database setup completed successfully"
 
+# Build ESCO skill index (only if not already cached in the volume)
+ESCO_INDEX="app/data/esco/skills_index.pkl"
+if [ ! -f "$ESCO_INDEX" ]; then
+    log "Building ESCO skill index (first run or cache cleared)..."
+    python scripts/build_esco_index.py || log "WARNING: ESCO index build failed. Skill matching will use fallback."
+else
+    log "ESCO skill index already cached, skipping build"
+fi
+
 # Pre-warm the embedding model
 log "Loading embedding model..."
 python -c "
@@ -76,6 +85,20 @@ except Exception as e:
     sys.exit(0)  # Don't fail startup
 " || log "Embedding model pre-warm skipped (non-critical)"
 
+# Production safety check: abort if source code is bind-mounted in production.
+# docker-compose.yml mounts .:/app, so docker-compose.yml will be present at
+# /app/docker-compose.yml when the dev volume is active.  In production we use
+# docker-compose.prod.yml which does NOT mount the source tree.
+if [ "$APP_ENV" = "production" ] && [ -f "/.dockerenv" ]; then
+    if [ -f "/app/docker-compose.yml" ]; then
+        error_exit "Source code bind-mount detected in production mode (docker-compose.yml found at /app). Use docker-compose.prod.yml, which uses a versioned image without source bind mounts."
+    fi
+fi
+
 # Start the FastAPI application
 log "Starting FastAPI server..."
-exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+if [ "$APP_ENV" = "production" ]; then
+    exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+else
+    exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+fi

@@ -6,6 +6,7 @@ from sqlalchemy.orm import selectinload
 from typing import List, Callable
 from app.core.database import get_db
 from app.core.security import verify_token
+from app.core.cache import get_cached_user, set_cached_user
 from app.models.user import User, UserRole
 from app.models.company import Company
 import uuid
@@ -25,11 +26,16 @@ async def get_current_user(
     )
     
     # Verify token
-    user_id = verify_token(credentials.credentials, "access")
+    user_id = await verify_token(credentials.credentials, "access")
     if user_id is None:
         raise credentials_exception
-    
-    # Get user from database with company relationship
+
+    # Check cache first
+    cached = await get_cached_user(user_id)
+    if cached is not None:
+        return cached
+
+    # Cache miss — load from database with company relationship
     result = await db.execute(
         select(User)
         .options(selectinload(User.company))
@@ -38,7 +44,8 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if user is None:
         raise credentials_exception
-        
+
+    await set_cached_user(user_id, user)
     return user
 
 

@@ -1,10 +1,17 @@
+import asyncio
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-from fastapi import FastAPI, HTTPException
+logger = logging.getLogger(__name__)
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from app.core.config import settings
+
+# Log active configuration at startup (secrets are masked)
+settings.log_config()
 from app.api.v1 import auth, jobs, swipes, applications, users, companies, notifications, filters
 from app.api.v1 import websocket, media, documents, ai
 
@@ -24,6 +31,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def request_timeout_middleware(request: Request, call_next):
+    """Return HTTP 504 if any request takes longer than 30 seconds."""
+    try:
+        return await asyncio.wait_for(call_next(request), timeout=30.0)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Request timed out after 30s: %s %s",
+            request.method,
+            request.url.path,
+        )
+        return JSONResponse({"error": "Request timeout"}, status_code=504)
 
 # Include API routers
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])

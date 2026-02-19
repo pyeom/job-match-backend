@@ -51,7 +51,7 @@ async def authenticate_websocket(token: str, db: AsyncSession) -> Optional[tuple
         logger.info("[WS Auth] Starting WebSocket authentication")
 
         # Decode JWT token
-        payload = decode_token(token)
+        payload = await decode_token(token)
         if not payload:
             logger.warning("[WS Auth] ❌ Invalid token - decode_token returned None")
             return None

@@ -1,31 +1,63 @@
 # syntax=docker/dockerfile:1.6
-FROM python:3.12-slim AS base
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+# ─── Stage 1: Builder ────────────────────────────────────────────────────────
+# Installs all Python packages and downloads SpaCy models.
+# Build tools (gcc, etc.) stay in this stage and are NOT copied to runtime.
+FROM python:3.12-slim AS builder
 
-WORKDIR /app
+# Build-time args: override for production to use larger/more accurate models
+#   Production: SPACY_MODEL_EN=en_core_web_trf  SPACY_MODEL_ES=es_core_news_lg
+#   Default (dev/CI): small models ~50 MB total vs ~800 MB for trf+lg
+ARG SPACY_MODEL_EN=en_core_web_sm
+ARG SPACY_MODEL_ES=es_core_news_sm
 
-# Install system dependencies (required for sentence-transformers, ML libraries, and file type detection)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
     libopenblas-dev \
-    curl \
-    libmagic1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies separately to maximize layer caching
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Create virtual environment — easy to copy between stages
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
 
-# Download SpaCy models (trf for production, sm as fallback)
-RUN python -m spacy download en_core_web_trf && \
-    python -m spacy download es_core_news_lg && \
-    python -m spacy download en_core_web_sm && \
-    python -m spacy download es_core_news_sm
+# Install Python dependencies.
+# torch is installed first from the CPU-only index to avoid pulling in ~2 GB of CUDA libraries.
+# The app only performs CPU inference; CUDA is never used at runtime.
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        torch && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Download SpaCy models into the venv.
+# spacy-transformers (and its torch dependency) is only required when a TRF model is selected.
+# For the default sm models, install spacy-transformers conditionally.
+RUN if echo "${SPACY_MODEL_EN} ${SPACY_MODEL_ES}" | grep -qE "trf|lg"; then \
+        pip install --no-cache-dir spacy-transformers; \
+    fi && \
+    python -m spacy download ${SPACY_MODEL_EN} && \
+    python -m spacy download ${SPACY_MODEL_ES}
+
+# ─── Stage 2: Runtime ────────────────────────────────────────────────────────
+# Minimal image: no build tools, no compiler, no git.
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# Runtime-only system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libopenblas0 \
+    libmagic1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy virtual environment from builder
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /app
 
 # Copy application code
 COPY app ./app
@@ -33,36 +65,25 @@ COPY alembic.ini .
 COPY migrations ./migrations
 COPY scripts ./scripts
 
-# Create non-root user for security and set up cache directories
+# Create non-root user and set up cache directories
+# /app/app/data/esco is created here so the named volume mount works correctly
 RUN useradd -m runner && \
-    mkdir -p /home/runner/.cache/huggingface && \
+    mkdir -p /home/runner/.cache/huggingface /app/app/data/esco && \
     chown -R runner:runner /app /home/runner/.cache && \
     chmod +x /app/scripts/*.sh /app/scripts/*.py
 
-# Set HuggingFace cache environment variables
-ENV HF_HOME=/home/runner/.cache/huggingface
-ENV TRANSFORMERS_CACHE=/home/runner/.cache/huggingface
-ENV SENTENCE_TRANSFORMERS_HOME=/home/runner/.cache/huggingface
+# HuggingFace cache env vars (model files live in a named volume, not baked in)
+ENV HF_HOME=/home/runner/.cache/huggingface \
+    TRANSFORMERS_CACHE=/home/runner/.cache/huggingface \
+    SENTENCE_TRANSFORMERS_HOME=/home/runner/.cache/huggingface
 
-# Switch to runner user
 USER runner
 
-# Try to pre-download the embedding model (non-fatal if it fails)
-# If this fails, copy the model manually to the hf_cache volume
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')" \
-    || echo "WARNING: Model download failed. Copy model files manually to hf_cache volume."
-
-# Build ESCO skill index (non-fatal if it fails)
-RUN python scripts/build_esco_index.py \
-    || echo "WARNING: ESCO index build failed. Skill matching will use fallback."
-
-# Expose port
 EXPOSE 8000
 ENV API_PORT=8000
 
-# Health check (FastAPI endpoint at /healthz)
-HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
+# Health check
+HEALTHCHECK --interval=30s --timeout=30s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/healthz || exit 1
 
-# Default command
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
