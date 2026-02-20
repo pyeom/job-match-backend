@@ -51,65 +51,93 @@ def decode_cursor(cursor: str) -> tuple[int, str, datetime]:
 async def discover_jobs(
     limit: int = Query(20, ge=1, le=50),
     cursor: Optional[str] = None,
-    current_user: User = Depends(get_job_seeker),  # Only job seekers can discover jobs
+    current_user: User = Depends(get_job_seeker),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get personalized job recommendations (discover feed)
+    """Get personalized job recommendations (discover feed).
 
-    This endpoint implements ML-driven job recommendations using:
-    - Vector similarity search with pgvector
-    - Hybrid scoring combining embeddings + rule-based factors
-    - Filtering out already swiped jobs
-    - Complex ranking algorithm as described in CLAUDE.md
+    Candidate retrieval uses Elasticsearch kNN vector search (limit x 5
+    candidates) instead of the previous 25x PostgreSQL multiplier.  The
+    small candidate pool is then re-ranked in Python with the full hybrid
+    ML scoring algorithm (55% embedding + skill/seniority/recency/location
+    factors).  A PostgreSQL fallback is used when ES is unavailable or the
+    user has no profile embedding.
     """
     from app.models.swipe import Swipe
     from app.services.scoring_service import scoring_service
-    from app.services.embedding_service import embedding_service
+    from app.services.elasticsearch_service import elasticsearch_service
 
     # Parse cursor if provided
-    cursor_score = None
-    cursor_job_id = None
-    cursor_created_at = None
+    cursor_score = cursor_job_id = cursor_created_at = None
     if cursor:
         cursor_score, cursor_job_id, cursor_created_at = decode_cursor(cursor)
 
-    # Get jobs that user hasn't swiped on (or has undone the swipe)
-    # using vector similarity if user has profile embedding
-    base_query = (
-        select(Job)
-        .options(selectinload(Job.company))
+    # ------------------------------------------------------------------
+    # 1. Collect swiped job IDs (needed for both ES and PG fallback paths)
+    # ------------------------------------------------------------------
+    swiped_result = await db.execute(
+        select(Swipe.job_id)
         .where(
-            and_(
-                Job.is_active == True,
-                not_(exists().where(
-                    and_(
-                        Swipe.job_id == Job.id,
-                        Swipe.user_id == current_user.id,
-                        Swipe.is_undone == False  # Exclude only active swipes, allow undone ones
-                    )
-                ))
-            )
+            Swipe.user_id == current_user.id,
+            Swipe.is_undone == False,  # noqa: E712
         )
     )
+    swiped_job_ids = [str(row[0]) for row in swiped_result.all()]
 
-    # If user has a profile embedding, use vector similarity search with larger pool
+    # ------------------------------------------------------------------
+    # 2. Candidate retrieval
+    # ------------------------------------------------------------------
     if current_user.profile_embedding is not None:
-        # Get larger candidate pool using vector similarity (e.g., top 300)
-        # Increase pool size to account for cursor filtering
-        candidate_limit = min(500, limit * 25)  # Get 25x more candidates for re-ranking
+        # --- Elasticsearch kNN path ---
+        candidate_limit = limit * 5  # <= 5x instead of the old 25x
 
-        # Use vector similarity ordering
-        stmt = base_query.order_by(
-            Job.job_embedding.cosine_distance(current_user.profile_embedding)
-        ).limit(candidate_limit)
+        es_job_ids = await elasticsearch_service.knn_discover(
+            user_embedding=list(current_user.profile_embedding),
+            exclude_job_ids=swiped_job_ids,
+            k=candidate_limit,
+        )
 
-        result = await db.execute(stmt)
-        candidate_jobs = result.scalars().all()
+        if es_job_ids:
+            # Fetch only the ES-returned jobs from PostgreSQL
+            import uuid as _uuid
+            uuid_ids = [_uuid.UUID(jid) for jid in es_job_ids]
+            result = await db.execute(
+                select(Job)
+                .options(selectinload(Job.company))
+                .where(Job.id.in_(uuid_ids), Job.is_active == True)  # noqa: E712
+            )
+            candidate_jobs = result.scalars().all()
+        else:
+            # ES miss (cold start / ES down) — fall back to pgvector ordering
+            logger.warning(
+                "Elasticsearch returned no results for user %s — falling back to PostgreSQL",
+                current_user.id,
+            )
+            pg_fallback_stmt = (
+                select(Job)
+                .options(selectinload(Job.company))
+                .where(
+                    and_(
+                        Job.is_active == True,  # noqa: E712
+                        not_(exists().where(
+                            and_(
+                                Swipe.job_id == Job.id,
+                                Swipe.user_id == current_user.id,
+                                Swipe.is_undone == False,  # noqa: E712
+                            )
+                        )),
+                    )
+                )
+                .order_by(Job.job_embedding.cosine_distance(current_user.profile_embedding))
+                .limit(limit * 5)
+            )
+            result = await db.execute(pg_fallback_stmt)
+            candidate_jobs = result.scalars().all()
 
-        # Re-rank using ML scoring
+        # Re-rank the small candidate pool with the full hybrid ML scorer
         scored_jobs = []
         for job in candidate_jobs:
-            if job.job_embedding is not None:  # Only score jobs with embeddings
+            if job.job_embedding is not None:
                 try:
                     score = scoring_service.calculate_job_score(
                         user_embedding=current_user.profile_embedding,
@@ -121,53 +149,76 @@ async def discover_jobs(
                         job_seniority=job.seniority,
                         job_location=job.location,
                         job_remote=job.remote or False,
-                        job_created_at=job.created_at
+                        job_created_at=job.created_at,
                     )
                     scored_jobs.append((job, score))
                 except Exception as e:
-                    # Fallback score if ML scoring fails
-                    print(f"ML scoring failed for job {job.id}: {e}")
+                    logger.warning("ML scoring failed for job %s: %s", job.id, e)
                     scored_jobs.append((job, 70))
             else:
-                # Default score for jobs without embeddings
                 scored_jobs.append((job, 60))
 
-        # Sort by score (descending), then by created_at (descending) for stable ordering
+        # Sort by score descending, then created_at descending for stability
         scored_jobs.sort(key=lambda x: (x[1], x[0].created_at), reverse=True)
 
         # Apply cursor filtering if provided
         if cursor_score is not None:
-            filtered_jobs = []
-            for job, score in scored_jobs:
-                # Include jobs with lower score, or same score but older/different id
-                if (score < cursor_score or
-                    (score == cursor_score and job.created_at < cursor_created_at) or
-                    (score == cursor_score and job.created_at == cursor_created_at and str(job.id) > cursor_job_id)):
-                    filtered_jobs.append((job, score))
-            scored_jobs = filtered_jobs
+            scored_jobs = [
+                (job, score) for job, score in scored_jobs
+                if (
+                    score < cursor_score
+                    or (score == cursor_score and job.created_at < cursor_created_at)
+                    or (
+                        score == cursor_score
+                        and job.created_at == cursor_created_at
+                        and str(job.id) > cursor_job_id
+                    )
+                )
+            ]
 
-        # Take requested limit + 1 to check if there are more results
         top_jobs = scored_jobs[:limit + 1]
 
     else:
-        # Fallback for users without profile embeddings - use recency with cursor
+        # ------------------------------------------------------------------
+        # Fallback for users without profile embeddings — simple recency
+        # ------------------------------------------------------------------
+        base_no_embed = (
+            select(Job)
+            .options(selectinload(Job.company))
+            .where(
+                and_(
+                    Job.is_active == True,  # noqa: E712
+                    not_(exists().where(
+                        and_(
+                            Swipe.job_id == Job.id,
+                            Swipe.user_id == current_user.id,
+                            Swipe.is_undone == False,  # noqa: E712
+                        )
+                    )),
+                )
+            )
+        )
+
         if cursor:
-            # For non-ML users, cursor contains created_at for simple pagination
-            stmt = base_query.where(Job.created_at < cursor_created_at).order_by(Job.created_at.desc()).limit(limit + 1)
+            stmt = (
+                base_no_embed
+                .where(Job.created_at < cursor_created_at)
+                .order_by(Job.created_at.desc())
+                .limit(limit + 1)
+            )
         else:
-            stmt = base_query.order_by(Job.created_at.desc()).limit(limit + 1)
+            stmt = base_no_embed.order_by(Job.created_at.desc()).limit(limit + 1)
 
         result = await db.execute(stmt)
         jobs = result.scalars().all()
-
-        # Give all jobs a baseline score
         top_jobs = [(job, 65) for job in jobs]
 
-    # Determine if there are more results and prepare items
+    # ------------------------------------------------------------------
+    # 3. Format and return
+    # ------------------------------------------------------------------
     has_more = len(top_jobs) > limit
-    items_to_return = top_jobs[:limit]  # Remove the extra item used for has_more check
+    items_to_return = top_jobs[:limit]
 
-    # Convert to response format
     job_results = []
     for job, score in items_to_return:
         job_data = {
@@ -193,23 +244,18 @@ async def discover_jobs(
                 "industry": job.company.industry,
                 "size": job.company.size,
                 "location": job.company.location,
-                "is_verified": job.company.is_verified
+                "is_verified": job.company.is_verified,
             } if job.company else None,
-            "score": score
+            "score": score,
         }
-
         job_results.append(JobWithCompany(**job_data))
 
-    # Generate next_cursor if there are more results
     next_cursor = None
     if has_more and items_to_return:
         last_job, last_score = items_to_return[-1]
         next_cursor = encode_cursor(last_score, last_job.id, last_job.created_at)
 
-    return DiscoverResponse(
-        items=job_results,
-        next_cursor=next_cursor
-    )
+    return DiscoverResponse(items=job_results, next_cursor=next_cursor)
 
 
 @router.get("/{job_id}", response_model=JobWithCompany)

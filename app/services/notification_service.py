@@ -391,25 +391,34 @@ class NotificationService:
                 logger.error(f"Cannot create notification: Application {application_id} not found in database")
                 return None
 
-            logger.debug(f"Application {application_id} found: user_id={application.user_id}, job_id={application.job_id}")
-
             # Get job details
             job = await self.job_repo.get(db, application.job_id)
             if not job:
                 logger.error(f"Cannot create notification: Job {application.job_id} not found in database")
                 return None
 
-            logger.debug(f"Job {job.id} found: title={job.title}, company_id={job.company_id}")
-
             # Verify company relationship is loaded
             if not job.company:
                 logger.error(f"Cannot create notification: Job {job.id} has no company relationship loaded")
                 return None
 
-            logger.debug(f"Company relationship loaded: company_id={job.company_id}, name={job.company.name}")
-
             # Generate notification message based on stage transition
             message = self._generate_stage_change_message(job.title, job.company.name, old_stage, new_stage)
+
+            # Deduplication: skip if an identical notification was created recently
+            duplicate = await self.notification_repo.find_recent_duplicate(
+                db,
+                notification_type=NotificationType.APPLICATION_UPDATE,
+                within_seconds=60,
+                user_id=application.user_id,
+                application_id=application.id,
+            )
+            if duplicate:
+                logger.info(
+                    f"Skipping duplicate APPLICATION_UPDATE notification for "
+                    f"application {application_id} (existing id={duplicate.id})"
+                )
+                return duplicate
 
             # Create notification for the job seeker
             notification_data = {
@@ -422,15 +431,12 @@ class NotificationService:
                 "is_read": False
             }
 
-            logger.debug(f"Creating notification with data: {notification_data}")
-
             notification = await self.notification_repo.create_notification(db, notification_data)
 
             logger.info(f"Successfully created notification {notification.id} for user {application.user_id} about application {application_id} status change")
 
             # Send real-time WebSocket notification
             try:
-                logger.info(f"[NotificationService] Preparing to send WebSocket notification to user {application.user_id}")
                 ws_payload = {
                     "type": "notification",
                     "data": {
@@ -445,13 +451,10 @@ class NotificationService:
                         "is_read": False
                     }
                 }
-                logger.debug(f"[NotificationService] WebSocket payload: {ws_payload}")
-
                 await connection_manager.send_to_user(
                     application.user_id,
                     ws_payload
                 )
-                logger.info(f"[NotificationService] WebSocket notification sent successfully to user {application.user_id}")
             except Exception as ws_error:
                 logger.error(f"[NotificationService] Failed to send WebSocket notification to user {application.user_id}: {ws_error}", exc_info=True)
 
@@ -472,7 +475,6 @@ class NotificationService:
                         "type": notification_data["type"].value,
                     },
                 )
-                logger.debug(f"Enqueued push notification for user {application.user_id}")
             except Exception as push_error:
                 logger.warning(f"Failed to enqueue push notification for user: {push_error}")
 
@@ -511,14 +513,10 @@ class NotificationService:
                 logger.error(f"Cannot create notification: Application {application_id} not found in database")
                 return None
 
-            logger.debug(f"Application {application_id} found: user_id={application.user_id}, job_id={application.job_id}")
-
             # Verify user relationship is loaded
             if not application.user:
                 logger.error(f"Cannot create notification: Application {application_id} has no user relationship loaded")
                 return None
-
-            logger.debug(f"User relationship loaded: email={application.user.email}, full_name={application.user.full_name}")
 
             # Get job and user details
             job = await self.job_repo.get(db, application.job_id)
@@ -526,18 +524,29 @@ class NotificationService:
                 logger.error(f"Cannot create notification: Job {application.job_id} not found in database")
                 return None
 
-            logger.debug(f"Job {job.id} found: title={job.title}, company_id={job.company_id}")
-
             # Verify company relationship is loaded
             if not job.company:
                 logger.error(f"Cannot create notification: Job {job.id} has no company relationship loaded")
                 return None
 
-            logger.debug(f"Company relationship loaded: company_id={job.company_id}, name={job.company.name}")
-
             # Create notification for the company
             applicant_name = application.user.full_name or application.user.email
             message = f"{applicant_name} has applied to your job posting: {job.title}"
+
+            # Deduplication: skip if an identical notification was created recently
+            duplicate = await self.notification_repo.find_recent_duplicate(
+                db,
+                notification_type=NotificationType.NEW_APPLICATION,
+                within_seconds=60,
+                company_id=job.company_id,
+                application_id=application.id,
+            )
+            if duplicate:
+                logger.info(
+                    f"Skipping duplicate NEW_APPLICATION notification for "
+                    f"application {application_id} (existing id={duplicate.id})"
+                )
+                return duplicate
 
             notification_data = {
                 "company_id": job.company_id,
@@ -549,15 +558,12 @@ class NotificationService:
                 "is_read": False
             }
 
-            logger.debug(f"Creating notification with data: {notification_data}")
-
             notification = await self.notification_repo.create_notification(db, notification_data)
 
             logger.info(f"Successfully created notification {notification.id} for company {job.company_id} about application {application_id}")
 
             # Send real-time WebSocket notification to company
             try:
-                logger.info(f"[NotificationService] Preparing to send WebSocket notification to company {job.company_id}")
                 ws_payload = {
                     "type": "notification",
                     "data": {
@@ -572,13 +578,10 @@ class NotificationService:
                         "is_read": False
                     }
                 }
-                logger.debug(f"[NotificationService] WebSocket payload for company: {ws_payload}")
-
                 await connection_manager.send_to_company(
                     job.company_id,
                     ws_payload
                 )
-                logger.info(f"[NotificationService] WebSocket notification sent successfully to company {job.company_id}")
             except Exception as ws_error:
                 logger.error(f"[NotificationService] Failed to send WebSocket notification to company {job.company_id}: {ws_error}", exc_info=True)
 
@@ -599,7 +602,6 @@ class NotificationService:
                         "type": notification_data["type"].value,
                     },
                 )
-                logger.debug(f"Enqueued push notification for company {job.company_id}")
             except Exception as push_error:
                 logger.warning(f"Failed to enqueue push notification for company: {push_error}")
 

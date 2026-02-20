@@ -62,7 +62,8 @@ class PushNotificationService:
         data: Optional[Dict[str, Any]] = None,
         priority: str = "default",
         sound: str = "default",
-        badge: Optional[int] = None
+        badge: Optional[int] = None,
+        http_client: Optional[httpx.AsyncClient] = None,
     ) -> Dict[str, Any]:
         """
         Send push notification to all active devices of a user.
@@ -102,7 +103,7 @@ class PushNotificationService:
         ]
 
         # Send in batches
-        return await self._send_batch(db, messages)
+        return await self._send_batch(db, messages, http_client=http_client)
 
     async def send_to_company(
         self,
@@ -113,7 +114,8 @@ class PushNotificationService:
         data: Optional[Dict[str, Any]] = None,
         priority: str = "default",
         sound: str = "default",
-        badge: Optional[int] = None
+        badge: Optional[int] = None,
+        http_client: Optional[httpx.AsyncClient] = None,
     ) -> Dict[str, Any]:
         """
         Send push notification to all active devices of a company.
@@ -153,7 +155,7 @@ class PushNotificationService:
         ]
 
         # Send in batches
-        return await self._send_batch(db, messages)
+        return await self._send_batch(db, messages, http_client=http_client)
 
     async def send_to_tokens(
         self,
@@ -164,7 +166,8 @@ class PushNotificationService:
         data: Optional[Dict[str, Any]] = None,
         priority: str = "default",
         sound: str = "default",
-        badge: Optional[int] = None
+        badge: Optional[int] = None,
+        http_client: Optional[httpx.AsyncClient] = None,
     ) -> Dict[str, Any]:
         """
         Send push notification to specific tokens.
@@ -198,12 +201,13 @@ class PushNotificationService:
             for token in tokens
         ]
 
-        return await self._send_batch(db, messages)
+        return await self._send_batch(db, messages, http_client=http_client)
 
     async def _send_batch(
         self,
         db: AsyncSession,
-        messages: List[Dict[str, Any]]
+        messages: List[Dict[str, Any]],
+        http_client: Optional[httpx.AsyncClient] = None,
     ) -> Dict[str, Any]:
         """
         Send push notifications in batches to Expo Push API.
@@ -224,55 +228,67 @@ class PushNotificationService:
             batch = messages[i:i + MAX_BATCH_SIZE]
 
             try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(
+                # Use the provided persistent client if available; otherwise create a
+                # short-lived one for this batch.  When using a persistent client we
+                # intentionally do NOT close it here — the caller owns its lifecycle.
+                if http_client is not None:
+                    response = await http_client.post(
                         EXPO_PUSH_ENDPOINT,
                         json=batch,
                         headers={
                             "Accept": "application/json",
                             "Content-Type": "application/json"
                         },
-                        timeout=30.0
                     )
-
-                    if response.status_code == 200:
-                        result = response.json()
-                        receipts = result.get("data", [])
-
-                        # Process receipts
-                        for idx, receipt in enumerate(receipts):
-                            if receipt.get("status") == "ok":
-                                total_sent += 1
-                            else:
-                                total_failed += 1
-                                error_type = receipt.get("details", {}).get("error")
-                                error_message = receipt.get("message", "Unknown error")
-
-                                # Log error
-                                logger.warning(
-                                    f"Push notification failed: {error_type} - {error_message}"
-                                )
-                                all_errors.append({
-                                    "token": batch[idx]["to"],
-                                    "error": error_type,
-                                    "message": error_message
-                                })
-
-                                # Deactivate token if it's invalid
-                                if error_type in INVALID_TOKEN_ERRORS:
-                                    await self._deactivate_token(db, batch[idx]["to"])
-
-                    else:
-                        # API error
-                        logger.error(
-                            f"Expo Push API error: {response.status_code} - {response.text}"
+                else:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await client.post(
+                            EXPO_PUSH_ENDPOINT,
+                            json=batch,
+                            headers={
+                                "Accept": "application/json",
+                                "Content-Type": "application/json"
+                            },
                         )
-                        total_failed += len(batch)
-                        all_errors.append({
-                            "error": "API_ERROR",
-                            "message": f"Status {response.status_code}",
-                            "count": len(batch)
-                        })
+
+                if response.status_code == 200:
+                    result = response.json()
+                    receipts = result.get("data", [])
+
+                    # Process receipts
+                    for idx, receipt in enumerate(receipts):
+                        if receipt.get("status") == "ok":
+                            total_sent += 1
+                        else:
+                            total_failed += 1
+                            error_type = receipt.get("details", {}).get("error")
+                            error_message = receipt.get("message", "Unknown error")
+
+                            # Log error
+                            logger.warning(
+                                f"Push notification failed: {error_type} - {error_message}"
+                            )
+                            all_errors.append({
+                                "token": batch[idx]["to"],
+                                "error": error_type,
+                                "message": error_message
+                            })
+
+                            # Deactivate token if it's invalid
+                            if error_type in INVALID_TOKEN_ERRORS:
+                                await self._deactivate_token(db, batch[idx]["to"])
+
+                else:
+                    # API error
+                    logger.error(
+                        f"Expo Push API error: {response.status_code} - {response.text}"
+                    )
+                    total_failed += len(batch)
+                    all_errors.append({
+                        "error": "API_ERROR",
+                        "message": f"Status {response.status_code}",
+                        "count": len(batch)
+                    })
 
             except httpx.TimeoutException:
                 logger.error("Timeout sending push notifications")

@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", env="REDIS_URL")
     redis_pool_size: int = Field(default=10, env="REDIS_POOL_SIZE")
 
+    # Elasticsearch Configuration
+    elasticsearch_url: str = Field(default="http://localhost:9200", env="ELASTICSEARCH_URL")
+
     # Database connection pool
     db_pool_size: int = Field(default=10, env="DB_POOL_SIZE")
     db_max_overflow: int = Field(default=20, env="DB_MAX_OVERFLOW")
@@ -49,6 +52,15 @@ class Settings(BaseSettings):
     spacy_model_es: str = Field(default="es_core_news_lg", env="SPACY_MODEL_ES")
     esco_skill_similarity_threshold: float = Field(default=0.75, env="ESCO_SKILL_THRESHOLD")
     esco_index_path: str = Field(default="app/data/esco/skills_index.pkl", env="ESCO_INDEX_PATH")
+
+    # Embedding update weights
+    # When merging a user's profile embedding with their swipe history the final
+    # vector is computed as:
+    #   updated = embedding_profile_weight * profile + embedding_history_weight * history_mean
+    # Both values must sum to 1.0.  Override via EMBEDDING_PROFILE_WEIGHT /
+    # EMBEDDING_HISTORY_WEIGHT environment variables.
+    embedding_profile_weight: float = Field(default=0.3, env="EMBEDDING_PROFILE_WEIGHT")
+    embedding_history_weight: float = Field(default=0.7, env="EMBEDDING_HISTORY_WEIGHT")
 
     @model_validator(mode="after")
     def validate_production_requirements(self) -> "Settings":
@@ -90,14 +102,20 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         return f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
 
-    # CORS - allow frontend origins (filter out None values)
+    # CORS - allow frontend origins (filter out None values).
+    # Both "localhost" and "127.0.0.1" variants are included because browsers
+    # treat them as different origins and may use either depending on how the
+    # dev server URL is opened.
     allowed_origins: List[str] = [
         origin for origin in [
             "http://localhost:3000",
-            "http://localhost:19006",  # Expo web
-            "http://localhost:8081",   # Expo Metro
-            "exp://localhost:19000",   # Expo development
-            os.getenv("FRONTEND_URL")
+            "http://localhost:19006",    # Expo web
+            "http://localhost:8081",     # Expo Metro
+            "exp://localhost:19000",     # Expo development
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:19006",
+            "http://127.0.0.1:8081",
+            os.getenv("FRONTEND_URL")   # Production frontend (e.g. https://job-match.cl)
         ] if origin is not None
     ]
 

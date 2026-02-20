@@ -16,6 +16,12 @@ class NotificationType(str, enum.Enum):
     PROMOTION = "PROMOTION"
 
 
+class DeliveryStatus(str, enum.Enum):
+    pending = "pending"
+    delivered = "delivered"
+    failed = "failed"
+
+
 class Notification(Base):
     __tablename__ = "notifications"
 
@@ -36,6 +42,14 @@ class Notification(Base):
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    # Push delivery tracking
+    delivery_status = Column(
+        Enum(DeliveryStatus, name="deliverystatus"),
+        nullable=False,
+        default=DeliveryStatus.pending,
+        server_default="pending",
+    )
 
     # Relationships
     user = relationship("User", foreign_keys=[user_id])

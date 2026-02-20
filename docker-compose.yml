@@ -48,6 +48,26 @@ services:
       timeout: 3s
       retries: 5
 
+  elasticsearch:
+    image: elasticsearch:8.15.3
+    container_name: elasticsearch-jobmatch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    volumes:
+      - esdata:/var/lib/elasticsearch/data
+    ports:
+      - "127.0.0.1:9200:9200"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 5
+
   backend:
     build:
       context: .
@@ -77,17 +97,20 @@ services:
       TRANSFORMERS_CACHE: /home/runner/.cache/huggingface
       SENTENCE_TRANSFORMERS_HOME: /home/runner/.cache/huggingface
       REDIS_URL: ${REDIS_URL}
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz/ready"]
       interval: 30s
-      timeout: 30s
-      start_period: 60s
+      timeout: 10s
+      start_period: 90s
       retries: 3
     depends_on:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      elasticsearch:
         condition: service_healthy
 
   worker:
@@ -112,13 +135,17 @@ services:
       TRANSFORMERS_CACHE: /home/runner/.cache/huggingface
       SENTENCE_TRANSFORMERS_HOME: /home/runner/.cache/huggingface
       REDIS_URL: ${REDIS_URL}
+      ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
 
 volumes:
   postgres_data:
   esco_cache:
+  esdata:
