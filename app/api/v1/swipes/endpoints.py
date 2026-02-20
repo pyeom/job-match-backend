@@ -21,6 +21,7 @@ from app.schemas.swipe import (
 from app.schemas.job import JobWithCompany
 from app.services.swipe_service import SwipeService
 from app.core.arq import get_arq_pool
+from app.services.scoring_service import ScoringService
 import base64
 import json
 from datetime import datetime
@@ -83,8 +84,19 @@ async def create_swipe(
         existing_application = result.scalar_one_or_none()
 
         if not existing_application:
-            score = swipe_data.score
-            logger.info(f"Staging application with score {score} for user {current_user.id} on job {job.id}")
+            score = ScoringService.calculate_job_score(
+                user_embedding=list(current_user.profile_embedding) if current_user.profile_embedding is not None else [],
+                job_embedding=list(job.job_embedding) if job.job_embedding is not None else [],
+                user_skills=current_user.skills,
+                user_seniority=current_user.seniority,
+                user_preferences=current_user.preferred_locations,
+                job_tags=job.tags,
+                job_seniority=job.seniority,
+                job_location=job.location,
+                job_remote=(job.work_arrangement == "Remote"),
+                job_created_at=job.created_at
+            )
+            logger.info(f"Staging application with server-calculated score {score} for user {current_user.id} on job {job.id}")
 
             application = Application(
                 user_id=current_user.id,

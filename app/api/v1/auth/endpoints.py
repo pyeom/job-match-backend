@@ -15,14 +15,33 @@ from app.schemas.auth import (
 from app.schemas.user import User as UserSchema
 from app.api.deps import get_current_user
 from app.services.embedding_service import embedding_service
+from app.services.rate_limit_service import rate_limit_service
 import uuid
 
 router = APIRouter()
 
 
 @router.post("/register", response_model=Token)
-async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
+async def register(
+    request: Request,
+    user_data: UserCreate,
+    db: AsyncSession = Depends(get_db),
+):
     """Register a new job seeker user"""
+    # Rate limit: 10 registrations per IP per hour
+    client_ip = request.client.host if request.client else "unknown"
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"register:ip:{client_ip}",
+        max_requests=10,
+        window_seconds=3600,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many registration attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     # Check if user already exists
     result = await db.execute(select(User).where(User.email == user_data.email))
     db_user = result.scalar_one_or_none()
@@ -72,8 +91,26 @@ async def register(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/register-company", response_model=Token)
-async def register_company_user(user_data: CompanyUserCreate, db: AsyncSession = Depends(get_db)):
+async def register_company_user(
+    request: Request,
+    user_data: CompanyUserCreate,
+    db: AsyncSession = Depends(get_db),
+):
     """Register a new company user with associated company"""
+    # Rate limit: 10 registrations per IP per hour (shared bucket with /register)
+    client_ip = request.client.host if request.client else "unknown"
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"register:ip:{client_ip}",
+        max_requests=10,
+        window_seconds=3600,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many registration attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     # Check if user already exists
     result = await db.execute(select(User).where(User.email == user_data.email))
     db_user = result.scalar_one_or_none()
@@ -151,8 +188,39 @@ async def register_company_user(user_data: CompanyUserCreate, db: AsyncSession =
 
 
 @router.post("/login", response_model=Token)
-async def login(user_credentials: UserLogin, db: AsyncSession = Depends(get_db)):
+async def login(
+    request: Request,
+    user_credentials: UserLogin,
+    db: AsyncSession = Depends(get_db),
+):
     """Authenticate user and return tokens"""
+    # Rate limit: 5 attempts per email per 15 minutes
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"login:email:{user_credentials.email.lower()}",
+        max_requests=5,
+        window_seconds=900,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts for this account. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    # Rate limit: 20 attempts per IP per 15 minutes
+    client_ip = request.client.host if request.client else "unknown"
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"login:ip:{client_ip}",
+        max_requests=20,
+        window_seconds=900,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts from this address. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     # Get user by email
     result = await db.execute(select(User).where(User.email == user_credentials.email))
     user = result.scalar_one_or_none()
@@ -177,8 +245,9 @@ async def login(user_credentials: UserLogin, db: AsyncSession = Depends(get_db))
 
 @router.post("/refresh", response_model=TokenRefreshResponse)
 async def refresh_access_token(
+    request: Request,
     refresh_request: RefreshTokenRequest,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Refresh access token using refresh token
@@ -195,6 +264,20 @@ async def refresh_access_token(
     - User validation to ensure account still exists
     - Proper error handling for various failure scenarios
     """
+    # Rate limit: 30 refresh attempts per IP per 15 minutes
+    client_ip = request.client.host if request.client else "unknown"
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"refresh:ip:{client_ip}",
+        max_requests=30,
+        window_seconds=900,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many token refresh attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     refresh_token = refresh_request.refresh_token
 
     # Verify refresh token format and signature

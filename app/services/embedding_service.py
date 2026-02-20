@@ -31,6 +31,11 @@ class EmbeddingService:
         return self._model
 
     @property
+    def is_loaded(self) -> bool:
+        """True only if the model is already in memory — no lazy loading triggered."""
+        return self._model is not None
+
+    @property
     def is_available(self) -> bool:
         """Check if the embedding model is loaded and available"""
         if self._model is not None:
@@ -38,6 +43,20 @@ class EmbeddingService:
         if not self._load_attempted:
             self._load_model()
         return self._model is not None
+
+    def ensure_loaded(self) -> None:
+        """Load the model synchronously; raise RuntimeError on failure.
+
+        Intended to be called via ``asyncio.to_thread(embedding_service.ensure_loaded)``
+        inside the startup lifespan so the first real request never blocks.
+        """
+        if self._model is not None:
+            return
+        self._load_model()
+        if self._model is None:
+            raise RuntimeError(
+                f"Embedding model failed to load: {self._load_error or 'unknown error'}"
+            )
 
     def _load_model(self):
         """Load the sentence transformer model"""
@@ -230,39 +249,54 @@ class EmbeddingService:
             raise
     
     def update_user_embedding_with_history(
-        self, 
-        base_embedding: List[float], 
-        liked_job_embeddings: List[List[float]], 
-        alpha: float = 0.3
+        self,
+        base_embedding: List[float],
+        liked_job_embeddings: List[List[float]],
+        alpha: Optional[float] = None,
     ) -> List[float]:
-        """Update user embedding based on liked jobs history
-        
+        """Update user embedding based on liked jobs history.
+
+        The blend weights are read from application settings so they can be
+        tuned via environment variables without code changes:
+          - ``EMBEDDING_PROFILE_WEIGHT`` (default 0.3) — weight of the base
+            profile embedding.
+          - ``EMBEDDING_HISTORY_WEIGHT`` (default 0.7) — weight of the mean
+            swipe-history embedding.
+
+        The optional ``alpha`` parameter is kept for backward compatibility; if
+        provided it overrides ``settings.embedding_profile_weight``.
+
         Args:
-            base_embedding: Original user profile embedding
-            liked_job_embeddings: List of embeddings from jobs user swiped RIGHT
-            alpha: Weight for base profile (0.3 = 30% profile, 70% history)
-            
+            base_embedding: Original user profile embedding.
+            liked_job_embeddings: List of embeddings from jobs the user swiped
+                RIGHT on.
+            alpha: Override for the profile weight (uses
+                ``settings.embedding_profile_weight`` when ``None``).
+
         Returns:
-            Updated user embedding
+            Updated (and normalised) user embedding.
         """
         if not liked_job_embeddings:
             return base_embedding
-        
+
+        profile_weight = alpha if alpha is not None else settings.embedding_profile_weight
+        history_weight = 1.0 - profile_weight if alpha is not None else settings.embedding_history_weight
+
         try:
             base_array = np.array(base_embedding)
             history_arrays = [np.array(emb) for emb in liked_job_embeddings]
-            
+
             # Calculate mean of historical job embeddings
             history_mean = np.mean(history_arrays, axis=0)
-            
+
             # Combine with weighted average
-            updated_embedding = alpha * base_array + (1 - alpha) * history_mean
-            
+            updated_embedding = profile_weight * base_array + history_weight * history_mean
+
             # Normalize the embedding
             norm = np.linalg.norm(updated_embedding)
             if norm > 0:
                 updated_embedding = updated_embedding / norm
-            
+
             return updated_embedding.tolist()
         except Exception as e:
             logger.error(f"Failed to update user embedding: {e}")

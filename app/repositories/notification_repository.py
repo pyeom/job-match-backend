@@ -454,3 +454,53 @@ class NotificationRepository(BaseRepository[Notification]):
             await db.commit()
         """
         return await self.create(db, data)
+
+    async def find_recent_duplicate(
+        self,
+        db: AsyncSession,
+        notification_type: NotificationType,
+        within_seconds: int = 60,
+        user_id: Optional[UUID] = None,
+        company_id: Optional[UUID] = None,
+        application_id: Optional[UUID] = None,
+    ) -> Optional[Notification]:
+        """
+        Check if an identical notification exists within the last N seconds (deduplication).
+
+        Args:
+            db: Active database session
+            notification_type: The notification type to match
+            within_seconds: Time window in seconds to look back (default: 60)
+            user_id: Optional user target to match
+            company_id: Optional company target to match
+            application_id: Optional application reference to match
+
+        Returns:
+            Existing duplicate notification if found, otherwise None
+
+        Example:
+            duplicate = await repo.find_recent_duplicate(
+                db,
+                notification_type=NotificationType.APPLICATION_UPDATE,
+                within_seconds=60,
+                user_id=user_id,
+                application_id=application_id,
+            )
+            if duplicate:
+                return duplicate  # Skip creating a new one
+        """
+        cutoff = datetime.utcnow() - timedelta(seconds=within_seconds)
+        conditions = [
+            Notification.type == notification_type,
+            Notification.created_at >= cutoff,
+        ]
+        if user_id:
+            conditions.append(Notification.user_id == user_id)
+        if company_id:
+            conditions.append(Notification.company_id == company_id)
+        if application_id:
+            conditions.append(Notification.application_id == application_id)
+
+        stmt = select(Notification).where(and_(*conditions)).limit(1)
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()

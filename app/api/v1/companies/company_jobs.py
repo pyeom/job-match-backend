@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func, desc
@@ -20,6 +22,8 @@ from app.services.embedding_service import EmbeddingService
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import uuid
+
+logger = logging.getLogger(__name__)
 
 
 class JobApplicationStats(BaseModel):
@@ -133,6 +137,13 @@ async def create_job(
         .where(Job.id == job.id)
     )
     refreshed_job = result.scalar_one()
+
+    # Sync to Elasticsearch (non-fatal — search degrades gracefully on failure)
+    from app.services.elasticsearch_service import elasticsearch_service
+    try:
+        await elasticsearch_service.index_job(refreshed_job)
+    except Exception as exc:
+        logger.warning("ES index failed for new job %s: %s", refreshed_job.id, exc)
 
     return refreshed_job
 
@@ -268,6 +279,13 @@ async def update_company_job(
     await db.commit()
     await db.refresh(job, ['company'])
 
+    # Sync updated document to Elasticsearch
+    from app.services.elasticsearch_service import elasticsearch_service
+    try:
+        await elasticsearch_service.index_job(job)
+    except Exception as exc:
+        logger.warning("ES index failed for updated job %s: %s", job.id, exc)
+
     return job
 
 
@@ -293,6 +311,13 @@ async def delete_company_job(
     # Soft delete by setting is_active to False
     job.is_active = False
     await db.commit()
+
+    # Mark job as inactive in Elasticsearch so it is excluded from kNN results
+    from app.services.elasticsearch_service import elasticsearch_service
+    try:
+        await elasticsearch_service.update_job_active_status(str(job_id), False)
+    except Exception as exc:
+        logger.warning("ES deactivation failed for job %s: %s", job_id, exc)
 
     return {"message": "Job deactivated successfully"}
 

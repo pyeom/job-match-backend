@@ -201,6 +201,15 @@ class ConnectionManager:
         """Update last pong time for connection health tracking."""
         self.last_pong[websocket] = datetime.utcnow()
 
+    def get_all_connections(self) -> list[WebSocket]:
+        """Return a flat list of all active WebSocket connections."""
+        all_connections: list[WebSocket] = []
+        for conns in self.user_connections.values():
+            all_connections.extend(conns)
+        for conns in self.company_connections.values():
+            all_connections.extend(conns)
+        return all_connections
+
     def get_connection_count(self) -> dict:
         """Get statistics about active connections."""
         user_count = sum(len(conns) for conns in self.user_connections.values())

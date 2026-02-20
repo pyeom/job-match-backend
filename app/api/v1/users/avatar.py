@@ -33,11 +33,11 @@ async def upload_avatar(
 
     Rate limit: 10 uploads per hour per user.
     """
-    # Check rate limit
-    is_allowed, retry_after = rate_limit_service.check_rate_limit(
-        user_id=current_user.id,
+    # Check rate limit (10 uploads per hour per user)
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"avatar:user:{current_user.id}",
         max_requests=10,
-        window_seconds=3600  # 1 hour
+        window_seconds=3600,
     )
 
     if not is_allowed:
@@ -125,9 +125,6 @@ async def upload_avatar(
         )
 
     await invalidate_user_cache(str(current_user.id))
-
-    # Record successful request for rate limiting
-    rate_limit_service.record_request(current_user.id)
 
     return AvatarUploadResponse(
         avatar_url=avatar_url,

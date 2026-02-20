@@ -1,117 +1,153 @@
 """
 Rate limiting service for API endpoints.
-In-memory implementation for now, should use Redis in production.
+
+Uses Redis sorted sets (sliding window algorithm) for distributed, accurate
+rate limiting. Falls back gracefully if Redis is unavailable.
+
+Legacy in-memory helpers (check_rate_limit with user_id, record_request,
+cleanup_old_entries) are retained for backward compatibility but are no-ops
+when Redis is available.
 """
-from datetime import datetime, timedelta
-from typing import Dict, Tuple
-from collections import defaultdict
+import logging
+import time
 import uuid
+from typing import Tuple
+
+logger = logging.getLogger(__name__)
 
 
 class RateLimitService:
-    """Service for rate limiting requests per user."""
+    """
+    Rate limiting service backed by Redis sliding-window counters.
 
-    def __init__(self):
-        # Store: {user_id: [(timestamp1, count1), (timestamp2, count2), ...]}
-        # Each entry represents a time window with count of requests
-        self._requests: Dict[uuid.UUID, list[Tuple[datetime, int]]] = defaultdict(list)
+    The primary interface is the async ``check_rate_limit(key, max_requests,
+    window_seconds)`` method which atomically records and evaluates the
+    current request against a per-key sorted-set counter in Redis.
 
-    def check_rate_limit(
+    Legacy synchronous methods (``record_request``, ``cleanup_old_entries``)
+    are kept as no-ops so that existing callers (e.g. avatar upload) continue
+    to import without errors while being migrated to the async interface.
+    """
+
+    # ── Redis sliding-window implementation ───────────────────────────────────
+
+    async def check_rate_limit(
         self,
-        user_id: uuid.UUID,
-        max_requests: int = 10,
-        window_seconds: int = 3600
+        key: str,
+        max_requests: int,
+        window_seconds: int,
+        *,
+        # Legacy keyword arguments accepted for backward compatibility.
+        # If ``user_id`` is supplied instead of ``key`` (old call-site style)
+        # the caller must migrate; this signature handles both styles via the
+        # ``key`` positional parameter.
+        user_id: uuid.UUID | None = None,
     ) -> Tuple[bool, int]:
         """
-        Check if user has exceeded rate limit.
+        Check whether the caller identified by *key* has exceeded the rate
+        limit, and record the current request.
+
+        Uses a Redis sorted-set sliding window:
+        - Removes entries older than the window.
+        - Inserts the current timestamp.
+        - Counts remaining entries.
+        - Sets a TTL so keys expire automatically.
 
         Args:
-            user_id: The user's UUID
-            max_requests: Maximum number of requests allowed in the time window
-            window_seconds: Time window in seconds (default: 3600 = 1 hour)
+            key:            Unique rate-limit bucket identifier, e.g.
+                            ``"login:ip:1.2.3.4"`` or ``"login:email:a@b.com"``.
+            max_requests:   Maximum number of requests allowed inside
+                            *window_seconds*.
+            window_seconds: Length of the sliding window in seconds.
 
         Returns:
-            Tuple of (is_allowed, retry_after_seconds)
-            - is_allowed: True if request is allowed, False if rate limit exceeded
-            - retry_after_seconds: 0 if allowed, otherwise seconds until rate limit resets
+            Tuple of (is_allowed, retry_after_seconds).
+            ``is_allowed`` is False when the limit is exceeded.
+            ``retry_after_seconds`` is 0 when allowed, otherwise the number
+            of seconds until the oldest request in the window expires.
         """
-        now = datetime.utcnow()
-        cutoff_time = now - timedelta(seconds=window_seconds)
+        # Support legacy callers that pass user_id as the first positional arg.
+        # In that case ``key`` will actually be a UUID object.
+        if isinstance(key, uuid.UUID) or user_id is not None:
+            resolved_key = f"ratelimit:user:{user_id or key}"
+        else:
+            resolved_key = f"ratelimit:{key}"
 
-        # Clean up old entries
-        if user_id in self._requests:
-            self._requests[user_id] = [
-                (ts, count) for ts, count in self._requests[user_id]
-                if ts > cutoff_time
-            ]
+        try:
+            from app.core.cache import get_redis
 
-        # Count requests in current window
-        total_requests = sum(count for _, count in self._requests[user_id])
+            r = await get_redis()
+            now = time.time()
+            window_start = now - window_seconds
 
-        if total_requests >= max_requests:
-            # Calculate retry_after - time until oldest request expires
-            if self._requests[user_id]:
-                oldest_timestamp = self._requests[user_id][0][0]
-                retry_after = int((oldest_timestamp + timedelta(seconds=window_seconds) - now).total_seconds())
-                return False, max(retry_after, 0)
-            return False, window_seconds
+            pipe = r.pipeline()
+            # Remove entries that have fallen outside the current window.
+            pipe.zremrangebyscore(resolved_key, 0, window_start)
+            # Record this request with the current timestamp as both member
+            # and score (append a random suffix to avoid member collisions when
+            # multiple requests arrive at the same fractional second).
+            pipe.zadd(resolved_key, {f"{now}:{time.monotonic_ns()}": now})
+            # Count entries remaining inside the window.
+            pipe.zcard(resolved_key)
+            # Ensure the key expires so Redis memory is not leaked.
+            pipe.expire(resolved_key, window_seconds)
+            results = await pipe.execute()
 
-        return True, 0
+            count: int = results[2]
+
+            if count > max_requests:
+                # Find the oldest entry to compute the precise retry-after.
+                oldest = await r.zrange(resolved_key, 0, 0, withscores=True)
+                if oldest:
+                    retry_after = int(window_seconds - (now - oldest[0][1]))
+                    retry_after = max(retry_after, 1)
+                else:
+                    retry_after = window_seconds
+                return False, retry_after
+
+            return True, 0
+
+        except Exception:
+            # If Redis is unavailable, fail open rather than blocking all users.
+            logger.warning(
+                "Rate limit check failed for key '%s' — failing open",
+                key,
+                exc_info=True,
+            )
+            return True, 0
+
+    # ── Legacy synchronous stubs (backward compatibility) ─────────────────────
 
     def record_request(self, user_id: uuid.UUID) -> None:
         """
-        Record a request for the user.
+        No-op stub retained for backward compatibility.
 
-        Args:
-            user_id: The user's UUID
+        The Redis implementation records each request atomically inside
+        ``check_rate_limit``, so a separate ``record_request`` call is no
+        longer needed. Existing call-sites that still invoke this method will
+        continue to work without error.
         """
-        now = datetime.utcnow()
-
-        # Add new request timestamp
-        # We store each request individually for accurate tracking
-        self._requests[user_id].append((now, 1))
 
     def reset_user_limit(self, user_id: uuid.UUID) -> None:
         """
-        Reset rate limit for a specific user (admin function).
+        No-op stub retained for backward compatibility.
 
-        Args:
-            user_id: The user's UUID
+        To reset a Redis-backed limit, delete the key directly via
+        ``get_redis().delete(f"ratelimit:user:{user_id}")``.
         """
-        if user_id in self._requests:
-            del self._requests[user_id]
 
     def cleanup_old_entries(self, max_age_seconds: int = 7200) -> int:
         """
-        Clean up old entries to prevent memory bloat.
-        Should be called periodically (e.g., via background task).
+        No-op stub retained for backward compatibility.
 
-        Args:
-            max_age_seconds: Maximum age of entries to keep (default: 2 hours)
+        Redis keys have a TTL set by ``check_rate_limit`` and expire
+        automatically, so no periodic cleanup is required.
 
         Returns:
-            Number of users cleaned up
+            Always 0 (nothing cleaned up by this method).
         """
-        now = datetime.utcnow()
-        cutoff_time = now - timedelta(seconds=max_age_seconds)
-
-        users_to_remove = []
-
-        for user_id, requests in self._requests.items():
-            # Filter out old requests
-            filtered_requests = [(ts, count) for ts, count in requests if ts > cutoff_time]
-
-            if not filtered_requests:
-                users_to_remove.append(user_id)
-            else:
-                self._requests[user_id] = filtered_requests
-
-        # Remove users with no recent requests
-        for user_id in users_to_remove:
-            del self._requests[user_id]
-
-        return len(users_to_remove)
+        return 0
 
 
-# Singleton instance
+# Singleton instance used throughout the application.
 rate_limit_service = RateLimitService()

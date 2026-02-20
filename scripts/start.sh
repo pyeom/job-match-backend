@@ -68,22 +68,9 @@ else
     log "ESCO skill index already cached, skipping build"
 fi
 
-# Pre-warm the embedding model
-log "Loading embedding model..."
-python -c "
-from app.services.embedding_service import embedding_service
-import sys
-
-try:
-    if embedding_service.is_available:
-        print('Embedding model loaded successfully')
-    else:
-        print('Warning: Embedding model failed to load, will retry on first request')
-        sys.exit(0)  # Don't fail startup, model loading is optional
-except Exception as e:
-    print(f'Warning: Could not pre-warm embedding model: {e}')
-    sys.exit(0)  # Don't fail startup
-" || log "Embedding model pre-warm skipped (non-critical)"
+# NOTE: Embedding model pre-loading is handled by the FastAPI lifespan handler
+# (app/main.py). It loads the model before the first request and surfaces its
+# status via GET /healthz/ready. No pre-warm step is needed here.
 
 # Production safety check: abort if source code is bind-mounted in production.
 # docker-compose.yml mounts .:/app, so docker-compose.yml will be present at
@@ -97,8 +84,31 @@ fi
 
 # Start the FastAPI application
 log "Starting FastAPI server..."
+
+# Graceful shutdown handler: forward SIGTERM/SIGINT to uvicorn and wait for
+# it to drain in-flight requests before the container exits.
+cleanup() {
+    log "Received shutdown signal, waiting for uvicorn to drain..."
+    kill -SIGTERM "$UVICORN_PID" 2>/dev/null
+    wait "$UVICORN_PID" 2>/dev/null
+    log "Shutdown complete"
+}
+trap cleanup SIGTERM SIGINT
+
 if [ "$APP_ENV" = "production" ]; then
-    exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+    uvicorn app.main:app \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --timeout-graceful-shutdown 30 \
+        --workers 2 &
 else
-    exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # --reload and --workers are mutually exclusive; dev uses single worker.
+    uvicorn app.main:app \
+        --host 0.0.0.0 \
+        --port 8000 \
+        --timeout-graceful-shutdown 30 \
+        --reload &
 fi
+
+UVICORN_PID=$!
+wait "$UVICORN_PID" || true

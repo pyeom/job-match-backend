@@ -8,7 +8,6 @@ from app.schemas.job import JobWithCompany
 class SwipeCreate(BaseModel):
     job_id: uuid.UUID
     direction: str  # LEFT or RIGHT
-    score: Optional[int] = None  # Match score from discover feed (0-100)
 
 
 class Swipe(BaseModel):

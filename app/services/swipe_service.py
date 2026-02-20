@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 from uuid import UUID
 from datetime import datetime, date, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
@@ -50,6 +51,30 @@ class SwipeService:
         """
         self.swipe_repo = swipe_repo or SwipeRepository()
 
+    def _get_user_today(self, user: User) -> date:
+        """
+        Return today's date in the user's configured timezone.
+
+        Falls back to UTC if the stored timezone string is missing or invalid.
+
+        Args:
+            user: User instance
+
+        Returns:
+            Current date in the user's local timezone
+        """
+        tz_name = getattr(user, "timezone", None) or "UTC"
+        try:
+            tz = ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError:
+            logger.warning(
+                "Unknown timezone '%s' for user %s — falling back to UTC",
+                tz_name,
+                user.id,
+            )
+            tz = ZoneInfo("UTC")
+        return datetime.now(tz).date()
+
     async def check_and_reset_daily_counter(
         self,
         db: AsyncSession,
@@ -58,8 +83,8 @@ class SwipeService:
         """
         Check if daily undo counter needs to be reset and reset if necessary.
 
-        The counter resets at midnight UTC. In production, you would want to
-        use the user's timezone, but for simplicity we use UTC here.
+        The counter resets at midnight in the user's configured timezone
+        (stored in ``user.timezone``, defaulting to ``"UTC"``).
 
         Args:
             db: Active database session
@@ -73,7 +98,7 @@ class SwipeService:
             await db.commit()
         """
         try:
-            today = date.today()
+            today = self._get_user_today(user)
 
             # Reset counter if it's a new day or never set
             if user.undo_count_reset_date is None or user.undo_count_reset_date < today:

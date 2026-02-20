@@ -103,11 +103,10 @@ class DocumentService:
         # Verify MIME type matches extension
         expected_mime = self._mime_from_extension(extension)
         if expected_mime and mime_type != expected_mime:
-            logger.warning(
-                f"MIME type mismatch: extension={extension}, "
-                f"expected={expected_mime}, detected={mime_type}"
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File content does not match extension {extension}"
             )
-            # Allow it but log the warning - some systems may report different MIME types
 
         # Perform basic security checks
         self._security_check(content, mime_type)

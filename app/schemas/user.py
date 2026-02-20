@@ -36,6 +36,7 @@ class UserBase(BaseModel):
     role: UserRole = UserRole.JOB_SEEKER
     avatar_url: Optional[str] = None
     avatar_thumbnail_url: Optional[str] = None
+    timezone: Optional[str] = "UTC"
 
 
 class UserCreate(UserBase):
@@ -52,6 +53,7 @@ class UserUpdate(BaseModel):
     seniority: Optional[str] = None
     experience: Optional[List[Dict[str, Any]]] = None
     education: Optional[List[Dict[str, Any]]] = None
+    timezone: Optional[str] = None
 
     @field_validator('full_name')
     @classmethod

@@ -41,6 +41,9 @@ class User(Base):
     # ML embedding for user profile (384 dimensions for all-MiniLM-L6-v2)
     profile_embedding = Column(Vector(384))
 
+    # Localization
+    timezone = Column(String(64), nullable=True, default="UTC")
+
     # Subscription and undo tracking
     is_premium = Column(Boolean, default=False, nullable=False)
     daily_undo_count = Column(Integer, default=0, nullable=False)
