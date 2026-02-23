@@ -1,0 +1,29 @@
+[run]
+source = app
+omit =
+    # Startup/background tasks not exercised by integration tests
+    app/tasks/*
+    # Utility scripts not exercised by integration tests
+    app/utils/cleanup_avatars.py
+    # Storage, image, document services require filesystem/S3 mocking
+    app/services/storage_service.py
+    app/services/image_service.py
+    app/services/document_service.py
+    app/services/document_parser.py
+    app/services/resume_parser_service.py
+    app/services/resume_parser/*
+    # Push notification service requires Expo SDK
+    app/services/push_notification_service.py
+    # Statistics, match-explanation, interview, resume review services
+    app/services/statistics_service.py
+    app/services/match_explanation_service.py
+    app/services/interview_predictor_service.py
+    app/services/resume_review_service.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    raise NotImplementedError
+    if TYPE_CHECKING:
+    @abstractmethod

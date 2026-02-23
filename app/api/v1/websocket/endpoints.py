@@ -12,6 +12,8 @@ import json
 from typing import Optional
 from uuid import UUID
 import asyncio
+from collections import deque
+import time
 
 from app.core.database import AsyncSessionLocal
 from app.core.websocket_manager import connection_manager
@@ -178,8 +180,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
         logger.info(f"[WS Endpoint] About to register connection - type: {owner_type}, id: {owner_id}")
 
-        # Register connection
-        await connection_manager.connect(websocket, owner_type, owner_id)
+        # Register connection (store token for periodic re-validation)
+        await connection_manager.connect(websocket, owner_type, owner_id, token)
         authenticated = True
 
         logger.info(f"[WS Endpoint] Connection registered successfully")
@@ -196,10 +198,28 @@ async def websocket_endpoint(websocket: WebSocket):
         # Start heartbeat task
         heartbeat_task = asyncio.create_task(send_heartbeat(websocket))
 
+        # Rate limiting state: max 20 messages per 60-second sliding window
+        _msg_timestamps: deque = deque()
+        _RATE_LIMIT = 20
+        _RATE_WINDOW = 60.0  # seconds
+
         # Listen for messages
         while True:
             try:
                 message = await websocket.receive_json()
+
+                # Rate limiting: max 20 messages per 60 seconds
+                now = time.monotonic()
+                while _msg_timestamps and now - _msg_timestamps[0] > _RATE_WINDOW:
+                    _msg_timestamps.popleft()
+                if len(_msg_timestamps) >= _RATE_LIMIT:
+                    logger.warning(f"WebSocket rate limit exceeded for {owner_type}={owner_id}")
+                    try:
+                        await websocket.close(code=1008, reason="Rate limit exceeded")
+                    except Exception:
+                        pass
+                    break
+                _msg_timestamps.append(now)
 
                 # Handle pong
                 if message.get("type") == "pong":
@@ -240,15 +260,24 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def send_heartbeat(websocket: WebSocket, interval: int = 30):
     """
-    Send periodic ping messages to keep connection alive.
+    Send periodic ping messages to keep connection alive and re-validate
+    the JWT token on each cycle.
+
+    Re-validation runs every `interval` seconds (default 30s), which ensures:
+    - A blacklisted token (e.g. after logout) causes disconnection within 30s.
+    - A naturally expired access token causes disconnection within 30s.
 
     Args:
         websocket: WebSocket connection
-        interval: Seconds between pings
+        interval: Seconds between pings and re-validation checks
     """
     try:
         while True:
             await asyncio.sleep(interval)
+            # Re-validate token before sending ping; closes and exits if invalid
+            valid = await connection_manager.revalidate_token(websocket)
+            if not valid:
+                break
             await websocket.send_json({"type": "ping"})
     except asyncio.CancelledError:
         pass

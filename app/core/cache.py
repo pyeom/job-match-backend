@@ -1,7 +1,7 @@
 import json
 import logging
 import uuid
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional
 
 from redis.asyncio import Redis, ConnectionPool
@@ -14,6 +14,7 @@ _pool: Optional[ConnectionPool] = None
 
 USER_CACHE_TTL = 300       # 5 minutes
 COMPANY_CACHE_TTL = 3600   # 1 hour
+JOB_CACHE_TTL = 1800       # 30 minutes
 
 
 # ── Connection pool ───────────────────────────────────────────────────────────
@@ -115,13 +116,6 @@ def _serialize_user_model(user) -> dict:
         "avatar_url": user.avatar_url,
         "avatar_thumbnail_url": user.avatar_thumbnail_url,
         "profile_embedding": emb,
-        "is_premium": bool(user.is_premium),
-        "daily_undo_count": user.daily_undo_count or 0,
-        "undo_count_reset_date": (
-            user.undo_count_reset_date.isoformat()
-            if user.undo_count_reset_date
-            else None
-        ),
         "created_at": user.created_at.isoformat() if user.created_at else None,
         "updated_at": user.updated_at.isoformat() if user.updated_at else None,
         "_company": company_data,
@@ -149,11 +143,6 @@ def _deserialize_user_model(data: dict):
     user.avatar_url = data.get("avatar_url")
     user.avatar_thumbnail_url = data.get("avatar_thumbnail_url")
     user.profile_embedding = data.get("profile_embedding")  # list of floats
-    user.is_premium = data.get("is_premium", False)
-    user.daily_undo_count = data.get("daily_undo_count", 0)
-
-    rsd = data.get("undo_count_reset_date")
-    user.undo_count_reset_date = date.fromisoformat(rsd) if rsd else None
 
     ca = data.get("created_at")
     user.created_at = datetime.fromisoformat(ca) if ca else None
@@ -238,3 +227,110 @@ async def invalidate_company_cache(company_id: str) -> None:
         logger.warning(
             "Company cache invalidation failed for %s", company_id, exc_info=True
         )
+
+
+# ── Job cache ─────────────────────────────────────────────────────────────────
+
+def _serialize_job_model(job) -> dict:
+    """Serialize a Job ORM instance to a JSON-safe dict.
+
+    The ``job_embedding`` vector field is intentionally excluded — it is large
+    and is not required for API response representations served from cache.
+    """
+    company_data = (
+        _serialize_company_model(job.company) if job.company is not None else None
+    )
+
+    return {
+        "id": str(job.id),
+        "title": job.title,
+        "company_id": str(job.company_id) if job.company_id else None,
+        "location": job.location,
+        "short_description": job.short_description,
+        "description": job.description,
+        "tags": job.tags,
+        "seniority": job.seniority,
+        "salary_min": job.salary_min,
+        "salary_max": job.salary_max,
+        "currency": job.currency,
+        "salary_negotiable": bool(job.salary_negotiable) if job.salary_negotiable is not None else False,
+        "remote": bool(job.remote) if job.remote is not None else False,
+        "work_arrangement": job.work_arrangement,
+        "job_type": job.job_type,
+        "is_active": bool(job.is_active),
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "_company": company_data,
+    }
+
+
+def _deserialize_job_model(data: dict):
+    """Reconstruct a Job ORM instance from a cached dict.
+
+    The ``job_embedding`` field is left as ``None`` because it is not stored in
+    the cache.  Callers that need the embedding must fetch the job from the DB.
+    """
+    from app.models.job import Job
+
+    job = Job()
+    job.id = uuid.UUID(data["id"])
+    job.title = data.get("title")
+    job.company_id = uuid.UUID(data["company_id"]) if data.get("company_id") else None
+    job.location = data.get("location")
+    job.short_description = data.get("short_description")
+    job.description = data.get("description")
+    job.tags = data.get("tags")
+    job.seniority = data.get("seniority")
+    job.salary_min = data.get("salary_min")
+    job.salary_max = data.get("salary_max")
+    job.currency = data.get("currency")
+    job.salary_negotiable = data.get("salary_negotiable", False)
+    job.remote = data.get("remote", False)
+    job.work_arrangement = data.get("work_arrangement")
+    job.job_type = data.get("job_type")
+    job.is_active = data.get("is_active", True)
+    job.job_embedding = None  # not cached — see docstring
+
+    ca = data.get("created_at")
+    job.created_at = datetime.fromisoformat(ca) if ca else None
+    ua = data.get("updated_at")
+    job.updated_at = datetime.fromisoformat(ua) if ua else None
+
+    company_data = data.get("_company")
+    job.company = _deserialize_company_model(company_data) if company_data else None
+
+    return job
+
+
+async def get_cached_job(job_id: str):
+    """Return a deserialized Job ORM instance from cache, or None on miss/error."""
+    try:
+        r = await get_redis()
+        raw = await r.get(f"job:{job_id}")
+        if raw:
+            return _deserialize_job_model(json.loads(raw))
+    except Exception:
+        logger.warning("Job cache read failed for %s", job_id, exc_info=True)
+    return None
+
+
+async def set_cached_job(job_id: str, job) -> None:
+    """Serialize and store a Job ORM instance in cache."""
+    try:
+        r = await get_redis()
+        await r.setex(
+            f"job:{job_id}",
+            JOB_CACHE_TTL,
+            json.dumps(_serialize_job_model(job)),
+        )
+    except Exception:
+        logger.warning("Job cache write failed for %s", job_id, exc_info=True)
+
+
+async def invalidate_job_cache(job_id: str) -> None:
+    """Delete a job's cache entry."""
+    try:
+        r = await get_redis()
+        await r.delete(f"job:{job_id}")
+    except Exception:
+        logger.warning("Job cache invalidation failed for %s", job_id, exc_info=True)

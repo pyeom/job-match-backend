@@ -2,10 +2,14 @@
 Document validation and processing service.
 Handles document validation, MIME type checking, file size limits, and basic security checks.
 """
+import io
 from typing import Optional, Tuple
 from fastapi import UploadFile, HTTPException, status
 import magic
+import clamd
 import logging
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +115,9 @@ class DocumentService:
         # Perform basic security checks
         self._security_check(content, mime_type)
 
+        # Scan for viruses using ClamAV
+        await self._scan_for_viruses(content)
+
         # Seek back to beginning for later processing
         await file.seek(0)
 
@@ -212,42 +219,42 @@ class DocumentService:
                     detail="Suspicious file content detected. File rejected for security reasons."
                 )
 
-        # 2. For PDFs, check for JavaScript (basic check)
+        # 2. For PDFs, block JavaScript content
         if mime_type == "application/pdf":
-            if b'/JavaScript' in content or b'/JS' in content:
-                logger.warning("PDF with JavaScript detected")
-                # Note: Not blocking JavaScript PDFs as they may be legitimate
-                # In production, use a more sophisticated PDF scanner
+            if b'/JavaScript' in content or b'/JS ' in content:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Document contains JavaScript and was rejected for security reasons."
+                )
 
-        # TODO: Integrate with ClamAV for virus scanning in production
-        # For now, this is a placeholder for future antivirus integration
-        # self._scan_with_clamav(content)
-
-    def _scan_with_clamav(self, content: bytes) -> None:
+    async def _scan_for_viruses(self, content: bytes) -> None:
         """
-        Placeholder for ClamAV virus scanning.
+        Scan file content for viruses using ClamAV daemon.
 
         Args:
             content: File content bytes
 
         Raises:
-            HTTPException: If virus is detected
-
-        Note:
-            This is a placeholder. In production, integrate with ClamAV daemon
-            using pyclamd or similar library.
+            HTTPException 400: If a virus or threat is detected.
+            HTTPException 503: If ClamAV is unreachable in production (fail-closed).
         """
-        # TODO: Implement ClamAV scanning
-        # Example implementation:
-        # import pyclamd
-        # cd = pyclamd.ClamdUnixSocket()
-        # result = cd.scan_stream(content)
-        # if result:
-        #     raise HTTPException(
-        #         status_code=400,
-        #         detail="Virus detected in uploaded file"
-        #     )
-        pass
+        try:
+            cd = clamd.ClamdNetworkSocket(host="clamav", port=3310, timeout=30)
+            result = cd.instream(io.BytesIO(content))
+            scan_status, threat = result.get("stream", ("OK", ""))
+            if scan_status == "FOUND":
+                logger.warning("Virus detected in upload: %s", threat)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Virus detected in uploaded file: {threat}"
+                )
+        except clamd.ConnectionError:
+            if settings.app_env == "production":
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Virus scanning service unavailable; upload rejected."
+                )
+            logger.warning("ClamAV unavailable, skipping virus scan (non-production mode)")
 
     def validate_file_size(self, content_length: Optional[int]) -> None:
         """

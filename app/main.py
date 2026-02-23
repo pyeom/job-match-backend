@@ -3,7 +3,8 @@ import logging
 from contextlib import asynccontextmanager
 from uuid import uuid4
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+import structlog
+from app.core.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from app.core.config import settings
+
+configure_logging(app_env=settings.app_env)
 
 # Log active configuration at startup (secrets are masked)
 settings.log_config()
@@ -73,11 +76,18 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(f"Cannot start: embedding model failed to load: {e}") from e
         logger.warning("Embedding model failed to load — running degraded: %s", e)
 
+    # 5. Start WebSocket Redis pub/sub listener for cross-instance delivery
+    from app.core.websocket_manager import connection_manager
+    await connection_manager.start_pubsub_listener()
+
     logger.info("Startup complete")
     yield  # ── Application running ────────────────────────────────────────────
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
     logger.info("Shutting down...")
+
+    # Stop pub/sub listener before closing connections
+    await connection_manager.stop_pubsub_listener()
 
     # Close all active WebSocket connections with a proper close frame so
     # clients receive a clean disconnect rather than a sudden TCP reset.
@@ -161,6 +171,8 @@ async def request_id_middleware(request: Request, call_next):
     """Assign a unique request ID to every request for end-to-end tracing."""
     request_id = request.headers.get("X-Request-ID", str(uuid4()))
     request.state.request_id = request_id
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(request_id=request_id)
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     return response

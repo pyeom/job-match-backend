@@ -1,8 +1,13 @@
+import base64
+import uuid
+import logging
+from datetime import datetime
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func, desc
-from typing import Optional
-from datetime import datetime
+from sqlalchemy import select, and_, func, desc, or_, nullslast
+from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 from app.api.deps import (
     get_company_user_with_verification,
@@ -12,7 +17,7 @@ from app.models.user import User
 from app.models.job import Job
 from app.models.application import Application
 from app.models.company import Company
-from app.schemas.company import PaginatedResponse
+from app.schemas.company import PaginatedResponse, CursorPaginatedResponse
 from app.schemas.application import (
     ApplicationUpdate,
     ApplicationWithDetails,
@@ -22,13 +27,14 @@ from app.schemas.application import (
     CompanyDetails
 )
 from pydantic import BaseModel
-import uuid
-import logging
 
 logger = logging.getLogger(__name__)
 
 
-# Stage transition validation
+# ---------------------------------------------------------------------------
+# Stage transition helpers
+# ---------------------------------------------------------------------------
+
 VALID_STAGES = ['SUBMITTED', 'REVIEW', 'INTERVIEW', 'TECHNICAL', 'DECISION']
 
 STAGE_TRANSITIONS = {
@@ -59,23 +65,105 @@ def validate_stage_transition(current_stage: str, new_stage: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Cursor helpers for application pagination
+#
+# Sort order: score DESC NULLS LAST, created_at DESC, id DESC
+# Cursor encodes: "{score_or_None}|{created_at.isoformat()}|{id}"
+# ---------------------------------------------------------------------------
+
+def _encode_application_cursor(
+    score: Optional[int],
+    created_at: datetime,
+    app_id: uuid.UUID,
+) -> str:
+    """Encode an application cursor as base64."""
+    raw = f"{score}|{created_at.isoformat()}|{app_id}"
+    return base64.b64encode(raw.encode()).decode()
+
+
+def _decode_application_cursor(
+    cursor: str,
+) -> tuple[Optional[float], datetime, uuid.UUID]:
+    """Decode an application cursor.  Raises HTTP 400 on invalid input."""
+    try:
+        raw = base64.b64decode(cursor.encode()).decode()
+        score_str, created_at_str, id_str = raw.split("|", 2)
+        c_score: Optional[float] = None if score_str == "None" else float(score_str)
+        c_created_at = datetime.fromisoformat(created_at_str)
+        c_id = uuid.UUID(id_str)
+        return c_score, c_created_at, c_id
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid pagination cursor")
+
+
+def _apply_application_cursor_filter(query, c_score: Optional[float], c_created_at: datetime, c_id: uuid.UUID):
+    """Append a WHERE clause that implements the keyset after the given cursor position.
+
+    Sort order is: score DESC NULLS LAST, created_at DESC, id DESC
+
+    Rows that come *after* the cursor satisfy at least one of:
+      1. score <  c_score                                          (lower score)
+      2. score == c_score AND created_at < c_created_at            (same score, older)
+      3. score == c_score AND created_at == c_created_at AND id < c_id   (tiebreak)
+      4. score IS NULL  (NULLs sort last — always after any non-NULL score)
+    """
+    if c_score is not None:
+        return query.where(
+            or_(
+                # Rows with a strictly lower score
+                Application.score < c_score,
+                # Same score, but older created_at
+                and_(
+                    Application.score == c_score,
+                    Application.created_at < c_created_at,
+                ),
+                # Same score, same created_at, smaller id (tiebreak)
+                and_(
+                    Application.score == c_score,
+                    Application.created_at == c_created_at,
+                    Application.id < c_id,
+                ),
+                # NULL scores come after all non-NULL scores
+                Application.score.is_(None),
+            )
+        )
+    else:
+        # The cursor itself has a NULL score — only rows with NULL score and
+        # an earlier position remain.
+        return query.where(
+            and_(
+                Application.score.is_(None),
+                or_(
+                    Application.created_at < c_created_at,
+                    and_(
+                        Application.created_at == c_created_at,
+                        Application.id < c_id,
+                    ),
+                ),
+            )
+        )
+
+
 router = APIRouter()
 
 
-@router.get("/{company_id}/jobs/{job_id}/applications", response_model=PaginatedResponse[ApplicationWithUserResponse])
+@router.get("/{company_id}/jobs/{job_id}/applications", response_model=CursorPaginatedResponse[ApplicationWithUserResponse])
 async def get_job_applications(
     company_id: uuid.UUID,
     job_id: uuid.UUID,
     limit: int = Query(50, ge=1, le=100),
-    page: int = Query(1, ge=1),
-    offset: Optional[int] = Query(None, ge=0),
-    stage_filter: Optional[str] = Query(None),  # NEW: Filter by stage
-    status_filter: Optional[str] = Query(None),  # Updated: Filter by status (ACTIVE, HIRED, REJECTED)
+    cursor: Optional[str] = Query(None, description="Opaque cursor from the previous page"),
+    stage_filter: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None),
     current_user: User = Depends(get_company_user_with_verification),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get all applications for a specific job with stage/status filtering"""
-    # Verify company access
+    """Get all applications for a specific job with cursor-based pagination.
+
+    Results are ordered ``score DESC NULLS LAST, created_at DESC, id DESC``.
+    Provide ``cursor`` from the previous ``next_cursor`` to fetch the next page.
+    """
     require_company_access(current_user, company_id)
 
     # Verify job belongs to company
@@ -83,16 +171,18 @@ async def get_job_applications(
         select(Job).where(Job.id == job_id, Job.company_id == company_id)
     )
     job = job_result.scalar_one_or_none()
-
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Calculate offset from page if not provided directly
-    if offset is None:
-        offset = (page - 1) * limit
+    # Parse cursor
+    c_score: Optional[float] = None
+    c_created_at: Optional[datetime] = None
+    c_id: Optional[uuid.UUID] = None
+    if cursor:
+        c_score, c_created_at, c_id = _decode_application_cursor(cursor)
 
-    # Build base query - need to join Company for JobDetails
-    base_query = (
+    # Build query — join User and Company so we can populate the response
+    query = (
         select(Application, User, Job, Company)
         .select_from(Application)
         .join(Job, Application.job_id == Job.id)
@@ -101,53 +191,62 @@ async def get_job_applications(
         .where(Application.job_id == job_id)
     )
 
-    # Apply stage filter (NEW)
     if stage_filter:
-        base_query = base_query.where(Application.stage == stage_filter)
+        query = query.where(Application.stage == stage_filter)
 
-    # Apply status filter (UPDATED)
     if status_filter:
-        base_query = base_query.where(Application.status == status_filter)
+        query = query.where(Application.status == status_filter)
 
-    # Get all results (we need to sort by score before pagination)
-    result = await db.execute(base_query)
-    rows = result.all()
+    # Apply keyset cursor filter
+    if c_created_at is not None and c_id is not None:
+        query = _apply_application_cursor_filter(query, c_score, c_created_at, c_id)
 
-    # Transform to response format
-    applications_with_scores = []
+    # DB-level ordering: score DESC NULLS LAST, created_at DESC, id DESC
+    query = query.order_by(
+        nullslast(Application.score.desc()),
+        Application.created_at.desc(),
+        Application.id.desc(),
+    ).limit(limit + 1)
+
+    result = await db.execute(query)
+    rows = list(result.all())
+
+    has_next = len(rows) > limit
+    if has_next:
+        rows = rows[:limit]
+
+    applications: list[ApplicationWithUserResponse] = []
     for app, user, job_info, company in rows:
-        flattened_app = ApplicationWithUserResponse(
-            id=app.id,
-            job_id=app.job_id,
-            job_title=job_info.title,
-            user_id=app.user_id,
-            user_email=user.email,
-            user_full_name=user.full_name,
-            user_headline=user.headline,
-            user_skills=user.skills,
-            user_seniority=user.seniority,
-            stage=app.stage,
-            status=app.status,
-            stage_updated_at=app.stage_updated_at,
-            rejection_reason=app.rejection_reason,
-            created_at=app.created_at,
-            updated_at=app.updated_at or app.created_at,
-            score=app.score  # Use stored score from application
+        applications.append(
+            ApplicationWithUserResponse(
+                id=app.id,
+                job_id=app.job_id,
+                job_title=job_info.title,
+                user_id=app.user_id,
+                user_email=user.email,
+                user_full_name=user.full_name,
+                user_headline=user.headline,
+                user_skills=user.skills,
+                user_seniority=user.seniority,
+                stage=app.stage,
+                status=app.status,
+                stage_updated_at=app.stage_updated_at,
+                rejection_reason=app.rejection_reason,
+                created_at=app.created_at,
+                updated_at=app.updated_at or app.created_at,
+                score=app.score,
+            )
         )
-        applications_with_scores.append(flattened_app)
 
-    # Sort by score (DESC) then by created_at (DESC) for ties
-    applications_with_scores.sort(key=lambda x: (-(x.score or 0), -x.created_at.timestamp()))
+    next_cursor: Optional[str] = None
+    if has_next and applications:
+        last = applications[-1]
+        next_cursor = _encode_application_cursor(last.score, last.created_at, last.id)
 
-    # Apply pagination after sorting
-    total = len(applications_with_scores)
-    applications_with_user_response = applications_with_scores[offset:offset + limit]
-
-    return PaginatedResponse(
-        items=applications_with_user_response,
-        total=total,
-        page=page,
-        limit=limit
+    return CursorPaginatedResponse(
+        items=applications,
+        next_cursor=next_cursor,
+        has_next=has_next,
     )
 
 
@@ -255,12 +354,13 @@ async def update_application_status(
         try:
             from app.services.notification_service import NotificationService
             from app.models.notification import NotificationType
-            import logging
 
-            logger = logging.getLogger(__name__)
             notification_service = NotificationService()
 
-            logger.info(f"Stage or status changed for application {application.id}. Stage changed: {stage_changed}, New status: {update_data.status}")
+            logger.info(
+                "Stage or status changed for application %s. Stage changed: %s, New status: %s",
+                application.id, stage_changed, update_data.status,
+            )
 
             # Determine notification type based on new status/stage
             if application.status == "REJECTED":
@@ -270,10 +370,13 @@ async def update_application_status(
             else:
                 notification_type = NotificationType.APPLICATION_UPDATE
 
-            logger.debug(f"Notification type determined: {notification_type}")
+            logger.debug("Notification type determined: %s", notification_type)
 
             # Create notification
-            logger.info(f"Attempting to create status notification for application {application.id}: {old_stage} -> {application.stage}")
+            logger.info(
+                "Attempting to create status notification for application %s: %s -> %s",
+                application.id, old_stage, application.stage,
+            )
 
             notification = await notification_service.create_application_status_notification(
                 db=db,
@@ -284,19 +387,23 @@ async def update_application_status(
 
             if notification:
                 await db.commit()
-                logger.info(f"Successfully created status notification {notification.id} for application {application.id}")
+                logger.info(
+                    "Successfully created status notification %s for application %s",
+                    notification.id, application.id,
+                )
             else:
-                logger.warning(f"Notification service returned None for application {application.id}")
+                logger.warning(
+                    "Notification service returned None for application %s", application.id
+                )
 
         except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Failed to create status notification for application {application.id}: {e}", exc_info=True)
+            logger.error(
+                "Failed to create status notification for application %s: %s",
+                application.id, e, exc_info=True,
+            )
             # Don't fail the request if notification fails
-            # Rollback only the notification transaction, not the application update
             await db.rollback()
 
-    # Return new format (no more status mapping)
     return ApplicationWithUserResponse(
         id=application.id,
         job_id=application.job_id,
@@ -313,17 +420,16 @@ async def update_application_status(
         rejection_reason=application.rejection_reason,
         created_at=application.created_at,
         updated_at=application.updated_at or application.created_at,
-        score=application.score  # Use stored score from application
+        score=application.score,
     )
 
 
-@router.get("/applications", response_model=PaginatedResponse[ApplicationWithUserResponse])
+@router.get("/applications", response_model=CursorPaginatedResponse[ApplicationWithUserResponse])
 async def get_all_company_applications(
     limit: int = Query(50, ge=1, le=100),
-    page: int = Query(1, ge=1),
-    offset: Optional[int] = Query(None, ge=0),
-    stage_filter: Optional[str] = Query(None),  # NEW: Filter by stage
-    status_filter: Optional[str] = Query(None),  # Updated: Filter by status (ACTIVE, HIRED, REJECTED)
+    cursor: Optional[str] = Query(None, description="Opaque cursor from the previous page"),
+    stage_filter: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None),
     seniority_filter: Optional[str] = Query(None),
     location_filter: Optional[str] = Query(None),
     created_after: Optional[datetime] = Query(None),
@@ -331,15 +437,22 @@ async def get_all_company_applications(
     current_user: User = Depends(get_company_user_with_verification),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get all applications for company with stage/status filtering"""
+    """Get all applications for the company with cursor-based pagination.
+
+    Results are ordered ``score DESC NULLS LAST, created_at DESC, id DESC``.
+    Provide ``cursor`` from the previous ``next_cursor`` to fetch the next page.
+    """
     company_id = current_user.company_id
 
-    # Calculate offset from page if not provided directly
-    if offset is None:
-        offset = (page - 1) * limit
+    # Parse cursor
+    c_score: Optional[float] = None
+    c_created_at: Optional[datetime] = None
+    c_id: Optional[uuid.UUID] = None
+    if cursor:
+        c_score, c_created_at, c_id = _decode_application_cursor(cursor)
 
     # Build base query with joins
-    base_query = (
+    query = (
         select(Application, User, Job)
         .select_from(Application)
         .join(Job, Application.job_id == Job.id)
@@ -349,60 +462,71 @@ async def get_all_company_applications(
 
     # Apply filters
     if stage_filter:
-        base_query = base_query.where(Application.stage == stage_filter)
+        query = query.where(Application.stage == stage_filter)
 
     if status_filter:
-        base_query = base_query.where(Application.status == status_filter)
+        query = query.where(Application.status == status_filter)
 
     if seniority_filter:
-        base_query = base_query.where(User.seniority == seniority_filter)
+        query = query.where(User.seniority == seniority_filter)
 
     if location_filter:
-        base_query = base_query.where(Job.location == location_filter)
+        query = query.where(Job.location == location_filter)
 
     if created_after:
-        base_query = base_query.where(Application.created_at >= created_after)
+        query = query.where(Application.created_at >= created_after)
 
     if created_before:
-        base_query = base_query.where(Application.created_at <= created_before)
+        query = query.where(Application.created_at <= created_before)
 
-    # Get all results (we need to sort by score before pagination)
-    result = await db.execute(base_query)
-    rows = result.all()
+    # Apply keyset cursor filter
+    if c_created_at is not None and c_id is not None:
+        query = _apply_application_cursor_filter(query, c_score, c_created_at, c_id)
 
-    # Transform to response format
-    applications_with_scores = []
+    # DB-level ordering: score DESC NULLS LAST, created_at DESC, id DESC
+    query = query.order_by(
+        nullslast(Application.score.desc()),
+        Application.created_at.desc(),
+        Application.id.desc(),
+    ).limit(limit + 1)
+
+    result = await db.execute(query)
+    rows = list(result.all())
+
+    has_next = len(rows) > limit
+    if has_next:
+        rows = rows[:limit]
+
+    applications: list[ApplicationWithUserResponse] = []
     for app, user, job in rows:
-        flattened_app = ApplicationWithUserResponse(
-            id=app.id,
-            job_id=app.job_id,
-            job_title=job.title,
-            user_id=app.user_id,
-            user_email=user.email,
-            user_full_name=user.full_name,
-            user_headline=user.headline,
-            user_skills=user.skills,
-            user_seniority=user.seniority,
-            stage=app.stage,
-            status=app.status,
-            stage_updated_at=app.stage_updated_at,
-            rejection_reason=app.rejection_reason,
-            created_at=app.created_at,
-            updated_at=app.updated_at or app.created_at,
-            score=app.score  # Use stored score from application
+        applications.append(
+            ApplicationWithUserResponse(
+                id=app.id,
+                job_id=app.job_id,
+                job_title=job.title,
+                user_id=app.user_id,
+                user_email=user.email,
+                user_full_name=user.full_name,
+                user_headline=user.headline,
+                user_skills=user.skills,
+                user_seniority=user.seniority,
+                stage=app.stage,
+                status=app.status,
+                stage_updated_at=app.stage_updated_at,
+                rejection_reason=app.rejection_reason,
+                created_at=app.created_at,
+                updated_at=app.updated_at or app.created_at,
+                score=app.score,
+            )
         )
-        applications_with_scores.append(flattened_app)
 
-    # Sort by score (DESC) then by created_at (DESC) for ties
-    applications_with_scores.sort(key=lambda x: (-(x.score or 0), -x.created_at.timestamp()))
+    next_cursor: Optional[str] = None
+    if has_next and applications:
+        last = applications[-1]
+        next_cursor = _encode_application_cursor(last.score, last.created_at, last.id)
 
-    # Apply pagination after sorting
-    total = len(applications_with_scores)
-    applications_with_user_response = applications_with_scores[offset:offset + limit]
-
-    return PaginatedResponse(
-        items=applications_with_user_response,
-        total=total,
-        page=page,
-        limit=limit
+    return CursorPaginatedResponse(
+        items=applications,
+        next_cursor=next_cursor,
+        has_next=has_next,
     )

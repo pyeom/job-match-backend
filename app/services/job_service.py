@@ -16,6 +16,7 @@ from app.models.job import Job
 from app.models.user import User, UserRole
 from app.repositories.job_repository import JobRepository
 from app.services.embedding_service import EmbeddingService
+from app.core.cache import get_cached_job, set_cached_job, invalidate_job_cache
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +241,9 @@ class JobService:
             else:
                 logger.info(f"Job {job_id} updated (no embedding regeneration) by user {current_user.id}")
 
+            # Invalidate cached job details so the next read reflects the update
+            await invalidate_job_cache(str(job_id))
+
             return updated_job
 
         except HTTPException:
@@ -301,6 +305,9 @@ class JobService:
 
             logger.info(f"Job {job_id} soft deleted by user {current_user.id}")
 
+            # Invalidate cached job details so stale is_active=True is not served
+            await invalidate_job_cache(str(job_id))
+
         except HTTPException:
             raise
         except Exception as e:
@@ -333,12 +340,21 @@ class JobService:
             print(f"{job.title} at {job.company.name}")
         """
         try:
+            # Check cache first — fall through to DB on any miss or error
+            cached = await get_cached_job(str(job_id))
+            if cached is not None:
+                logger.debug("Job cache hit for %s", job_id)
+                return cached
+
             job = await self.job_repo.get_job_with_company(db, job_id)
             if not job:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Job {job_id} not found"
                 )
+
+            # Populate cache for subsequent requests
+            await set_cached_job(str(job_id), job)
 
             return job
 

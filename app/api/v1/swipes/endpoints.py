@@ -4,7 +4,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from typing import Optional
 from app.core.database import get_db
-from app.api.deps import get_current_user, get_job_seeker
+from app.api.deps import get_job_seeker
 from app.models.user import User
 from app.models.job import Job
 from app.models.swipe import Swipe
@@ -14,7 +14,6 @@ from app.schemas.swipe import (
     Swipe as SwipeSchema,
     SwipeWithUndoWindow,
     UndoResponse,
-    UndoLimitInfo,
     RejectedJobsResponse,
     RejectedJobItem
 )
@@ -339,7 +338,6 @@ async def get_last_swipe(
     Features:
     - Returns None if no recent swipe within undo window
     - Includes remaining undo time in seconds
-    - Checks daily undo limit eligibility
     - Only returns non-undone swipes
 
     Response includes:
@@ -349,24 +347,16 @@ async def get_last_swipe(
     """
     swipe_service = SwipeService()
 
-    # Re-fetch user so service mutations are tracked by the session
-    user = await db.get(User, current_user.id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Reset daily counter if needed
-    await swipe_service.check_and_reset_daily_counter(db, user)
-
     # Get last swipe with window info
-    result = await swipe_service.get_last_swipe_with_window(db, user)
+    result = await swipe_service.get_last_swipe_with_window(db, current_user)
 
     if not result:
         return None
 
     swipe, remaining_time = result
 
-    # Check if user can undo (considering daily limit)
-    can_undo, _ = await swipe_service.check_undo_eligibility(db, user, swipe)
+    # Check if user can undo (ownership, not already undone, within window)
+    can_undo, _ = await swipe_service.check_undo_eligibility(db, current_user, swipe)
 
     return SwipeWithUndoWindow(
         id=swipe.id,
@@ -396,19 +386,16 @@ async def undo_swipe(
     - Swipe must be within 5-second undo window
     - Swipe must belong to the current user
     - Swipe must not be already undone
-    - User must not exceed daily undo limit (3 for free, 10 for premium)
 
     The operation:
     1. Validates swipe ownership and eligibility
     2. Marks swipe as undone with timestamp
-    3. Increments user's daily undo counter
-    4. Deletes associated application (if RIGHT swipe)
+    3. Deletes associated application (if RIGHT swipe)
 
     Returns:
     - Confirmation message
     - Swipe and job IDs
     - Timestamp of undo
-    - Remaining daily undos
     """
     from uuid import UUID
 
@@ -419,57 +406,18 @@ async def undo_swipe(
 
     swipe_service = SwipeService()
 
-    # Re-fetch user so the daily_undo_count mutation is tracked by the session
-    user = await db.get(User, current_user.id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
     # Undo the swipe
-    swipe = await swipe_service.undo_swipe(db, user, swipe_uuid)
+    swipe = await swipe_service.undo_swipe(db, current_user, swipe_uuid)
 
     # Commit transaction
     await db.commit()
     await db.refresh(swipe)
-
-    # Get remaining undos
-    remaining = swipe_service.get_remaining_daily_undos(user)
 
     return UndoResponse(
         message="Swipe undone successfully",
         swipe_id=swipe.id,
         job_id=swipe.job_id,
         undone_at=swipe.undone_at,
-        remaining_daily_undos=remaining
     )
 
 
-@router.get("/undo-limits", response_model=UndoLimitInfo)
-async def get_undo_limits(
-    current_user: User = Depends(get_job_seeker),
-    db: AsyncSession = Depends(get_db)
-):
-    """Get information about the user's undo limits and usage
-
-    This endpoint returns information about:
-    - Daily undo limit (3 for free users, 10 for premium)
-    - Number of undos used today
-    - Number of undos remaining today
-    - Premium status
-
-    The daily counter resets at midnight UTC.
-    """
-    swipe_service = SwipeService()
-
-    # Re-fetch user so the counter reset mutation is tracked by the session
-    user = await db.get(User, current_user.id)
-    if user is None:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    # Reset daily counter if needed
-    await swipe_service.check_and_reset_daily_counter(db, user)
-    await db.commit()
-
-    # Get limit info
-    info = swipe_service.get_undo_limit_info(user)
-
-    return UndoLimitInfo(**info)

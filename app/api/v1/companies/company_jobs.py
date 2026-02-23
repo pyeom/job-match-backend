@@ -1,8 +1,11 @@
 import logging
+import base64
+import uuid
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, func, desc
+from sqlalchemy import select, and_, func, desc, or_
 from sqlalchemy.orm import selectinload
 from typing import Optional
 from app.core.database import get_db
@@ -15,13 +18,12 @@ from app.models.user import User
 from app.models.company import Company
 from app.models.job import Job
 from app.models.application import Application
-from app.schemas.company import PaginatedResponse
+from app.schemas.company import PaginatedResponse, CursorPaginatedResponse
 from app.schemas.job import Job as JobSchema, JobCreate, JobUpdate
 from app.schemas.application import UserBasicInfo, JobBasicInfo
 from app.services.embedding_service import EmbeddingService
+from app.core.cache import invalidate_job_cache
 from pydantic import BaseModel
-from datetime import datetime, timedelta
-import uuid
 
 logger = logging.getLogger(__name__)
 
@@ -148,60 +150,89 @@ async def create_job(
     return refreshed_job
 
 
-@router.get("/{company_id}/jobs", response_model=PaginatedResponse[JobSchema])
+def _encode_job_cursor(created_at: datetime, job_id: uuid.UUID) -> str:
+    """Encode a cursor for job keyset pagination: base64(created_at.isoformat()|id)"""
+    raw = f"{created_at.isoformat()}|{job_id}"
+    return base64.b64encode(raw.encode()).decode()
+
+
+def _decode_job_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
+    """Decode a job cursor back to (created_at, id). Raises 400 on invalid input."""
+    try:
+        raw = base64.b64decode(cursor.encode()).decode()
+        created_at_str, id_str = raw.split("|", 1)
+        return datetime.fromisoformat(created_at_str), uuid.UUID(id_str)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid pagination cursor")
+
+
+@router.get("/{company_id}/jobs", response_model=CursorPaginatedResponse[JobSchema])
 async def get_company_jobs(
     company_id: uuid.UUID,
     limit: int = Query(20, ge=1, le=50),
-    page: int = Query(1, ge=1),
-    offset: Optional[int] = Query(None, ge=0),
+    cursor: Optional[str] = Query(None, description="Opaque cursor returned by the previous page"),
     active_only: bool = Query(True),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get all jobs for the company with pagination - accessible by job seekers and company users"""
-    # Job seekers can only see active jobs, company users can see all based on active_only param
-    is_company_user = (current_user.company_id == company_id)
+    """Get all jobs for the company with cursor-based pagination.
 
-    if is_company_user:
-        # Company users can see all jobs based on active_only parameter
-        pass
-    else:
-        # Job seekers can only see active jobs
+    Results are ordered by ``created_at DESC, id DESC``.
+    Pass the ``next_cursor`` value from the previous response as ``cursor`` to
+    fetch the next page.  Job seekers always see active jobs only; company users
+    can toggle ``active_only``.
+    """
+    # Job seekers can only see active jobs
+    is_company_user = (current_user.company_id == company_id)
+    if not is_company_user:
         active_only = True
 
-    # Calculate offset from page if not provided directly
-    if offset is None:
-        offset = (page - 1) * limit
+    # Parse cursor
+    cursor_created_at: Optional[datetime] = None
+    cursor_id: Optional[uuid.UUID] = None
+    if cursor:
+        cursor_created_at, cursor_id = _decode_job_cursor(cursor)
 
     # Build base query
-    base_query = select(Job).where(Job.company_id == company_id)
+    query = (
+        select(Job)
+        .options(selectinload(Job.company))
+        .where(Job.company_id == company_id)
+    )
 
     if active_only:
-        base_query = base_query.where(Job.is_active == True)
+        query = query.where(Job.is_active == True)  # noqa: E712
 
-    # Get total count
-    count_result = await db.execute(
-        select(func.count(Job.id)).select_from(base_query.subquery())
-    )
-    total = count_result.scalar() or 0
+    # Apply keyset filter when a cursor is provided
+    if cursor_created_at is not None and cursor_id is not None:
+        query = query.where(
+            or_(
+                Job.created_at < cursor_created_at,
+                and_(
+                    Job.created_at == cursor_created_at,
+                    Job.id < cursor_id,
+                ),
+            )
+        )
 
-    # Get paginated jobs
-    jobs_query = (
-        base_query
-        .options(selectinload(Job.company))
-        .order_by(desc(Job.created_at))
-        .offset(offset)
-        .limit(limit)
-    )
+    query = query.order_by(desc(Job.created_at), desc(Job.id)).limit(limit + 1)
 
-    result = await db.execute(jobs_query)
-    jobs = result.scalars().all()
+    result = await db.execute(query)
+    jobs = list(result.scalars().all())
 
-    return PaginatedResponse(
+    has_next = len(jobs) > limit
+    if has_next:
+        jobs = jobs[:limit]
+
+    next_cursor: Optional[str] = None
+    if has_next and jobs:
+        last = jobs[-1]
+        next_cursor = _encode_job_cursor(last.created_at, last.id)
+
+    return CursorPaginatedResponse(
         items=jobs,
-        total=total,
-        page=page,
-        limit=limit
+        next_cursor=next_cursor,
+        has_next=has_next,
     )
 
 
@@ -279,6 +310,9 @@ async def update_company_job(
     await db.commit()
     await db.refresh(job, ['company'])
 
+    # Invalidate cached job details so stale data is not served
+    await invalidate_job_cache(str(job_id))
+
     # Sync updated document to Elasticsearch
     from app.services.elasticsearch_service import elasticsearch_service
     try:
@@ -311,6 +345,9 @@ async def delete_company_job(
     # Soft delete by setting is_active to False
     job.is_active = False
     await db.commit()
+
+    # Invalidate cached job details so stale is_active=True is not served
+    await invalidate_job_cache(str(job_id))
 
     # Mark job as inactive in Elasticsearch so it is excluded from kNN results
     from app.services.elasticsearch_service import elasticsearch_service
