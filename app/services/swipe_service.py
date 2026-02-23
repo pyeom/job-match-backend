@@ -1,15 +1,14 @@
 """
 Swipe service for business logic related to swipes and undo operations.
 
-This module handles swipe management including undo limits, time window checks,
-and daily counter resets with proper timezone handling.
+This module handles swipe management including undo time-window checks
+and application cleanup when a swipe is undone.
 """
 
 from __future__ import annotations
 from typing import Optional, Tuple
 from uuid import UUID
-from datetime import datetime, date, timedelta, timezone
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from datetime import datetime, timezone
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
@@ -28,16 +27,12 @@ class SwipeService:
 
     This service coordinates between repositories and implements
     business logic for undo operations, including:
-    - Daily limit enforcement
-    - Undo window validation
-    - Counter resets
+    - Undo window validation (5-second time limit)
     - Application cleanup when swipes are undone
     """
 
     # Constants
     UNDO_WINDOW_SECONDS = 5
-    FREE_USER_DAILY_LIMIT = 3
-    PREMIUM_USER_DAILY_LIMIT = 10
 
     def __init__(
         self,
@@ -51,100 +46,6 @@ class SwipeService:
         """
         self.swipe_repo = swipe_repo or SwipeRepository()
 
-    def _get_user_today(self, user: User) -> date:
-        """
-        Return today's date in the user's configured timezone.
-
-        Falls back to UTC if the stored timezone string is missing or invalid.
-
-        Args:
-            user: User instance
-
-        Returns:
-            Current date in the user's local timezone
-        """
-        tz_name = getattr(user, "timezone", None) or "UTC"
-        try:
-            tz = ZoneInfo(tz_name)
-        except ZoneInfoNotFoundError:
-            logger.warning(
-                "Unknown timezone '%s' for user %s — falling back to UTC",
-                tz_name,
-                user.id,
-            )
-            tz = ZoneInfo("UTC")
-        return datetime.now(tz).date()
-
-    async def check_and_reset_daily_counter(
-        self,
-        db: AsyncSession,
-        user: User
-    ) -> User:
-        """
-        Check if daily undo counter needs to be reset and reset if necessary.
-
-        The counter resets at midnight in the user's configured timezone
-        (stored in ``user.timezone``, defaulting to ``"UTC"``).
-
-        Args:
-            db: Active database session
-            user: User instance
-
-        Returns:
-            User instance (possibly updated)
-
-        Example:
-            user = await service.check_and_reset_daily_counter(db, user)
-            await db.commit()
-        """
-        try:
-            today = self._get_user_today(user)
-
-            # Reset counter if it's a new day or never set
-            if user.undo_count_reset_date is None or user.undo_count_reset_date < today:
-                user.daily_undo_count = 0
-                user.undo_count_reset_date = today
-                await db.flush()
-
-            return user
-
-        except Exception as e:
-            logger.error(f"Error resetting daily counter for user {user.id}: {e}")
-            raise
-
-    def get_daily_limit(self, user: User) -> int:
-        """
-        Get the daily undo limit for a user based on their subscription.
-
-        Args:
-            user: User instance
-
-        Returns:
-            Daily undo limit (3 for free, 10 for premium)
-
-        Example:
-            limit = service.get_daily_limit(user)
-            print(f"User can undo {limit} times per day")
-        """
-        return self.PREMIUM_USER_DAILY_LIMIT if user.is_premium else self.FREE_USER_DAILY_LIMIT
-
-    def get_remaining_daily_undos(self, user: User) -> int:
-        """
-        Get the number of remaining undos for the user today.
-
-        Args:
-            user: User instance
-
-        Returns:
-            Number of remaining undos
-
-        Example:
-            remaining = service.get_remaining_daily_undos(user)
-            print(f"User has {remaining} undos left today")
-        """
-        limit = self.get_daily_limit(user)
-        return max(0, limit - user.daily_undo_count)
-
     async def check_undo_eligibility(
         self,
         db: AsyncSession,
@@ -157,8 +58,7 @@ class SwipeService:
         Verifies:
         1. Swipe belongs to user
         2. Swipe is not already undone
-        3. Swipe is within undo window
-        4. User has not exceeded daily limit
+        3. Swipe is within the undo window
 
         Args:
             db: Active database session
@@ -187,13 +87,6 @@ class SwipeService:
             if time_elapsed > self.UNDO_WINDOW_SECONDS:
                 return False, f"Undo window ({self.UNDO_WINDOW_SECONDS} seconds) has expired"
 
-            # Check daily limit
-            await self.check_and_reset_daily_counter(db, user)
-            remaining = self.get_remaining_daily_undos(user)
-            if remaining <= 0:
-                limit = self.get_daily_limit(user)
-                return False, f"Daily undo limit reached ({limit} undos per day). {'Upgrade to premium for more undos!' if not user.is_premium else 'Try again tomorrow.'}"
-
             return True, None
 
         except Exception as e:
@@ -210,10 +103,9 @@ class SwipeService:
         Undo a swipe.
 
         This operation:
-        1. Validates undo eligibility
+        1. Validates undo eligibility (ownership, not already undone, within window)
         2. Marks swipe as undone
-        3. Increments daily undo counter
-        4. Deletes associated application if RIGHT swipe
+        3. Deletes associated application if RIGHT swipe
 
         Args:
             db: Active database session
@@ -250,15 +142,10 @@ class SwipeService:
             # Mark as undone
             swipe = await self.swipe_repo.mark_as_undone(db, swipe)
 
-            # Increment daily counter
-            user.daily_undo_count += 1
-            await db.flush()
-
             # If RIGHT swipe, delete associated application
             if swipe.direction == "RIGHT":
-                from sqlalchemy import select, delete as sql_delete
+                from sqlalchemy import delete as sql_delete
 
-                # Delete application
                 delete_stmt = sql_delete(Application).where(
                     Application.user_id == user.id,
                     Application.job_id == swipe.job_id
@@ -268,8 +155,7 @@ class SwipeService:
                 logger.info(f"Deleted application for user {user.id} on job {swipe.job_id} due to undo")
 
             logger.info(
-                f"User {user.id} undid swipe {swipe_id} "
-                f"(direction: {swipe.direction}, daily count: {user.daily_undo_count})"
+                f"User {user.id} undid swipe {swipe_id} (direction: {swipe.direction})"
             )
 
             return swipe
@@ -323,27 +209,3 @@ class SwipeService:
         except Exception as e:
             logger.error(f"Error getting last swipe for user {user.id}: {e}")
             return None
-
-    def get_undo_limit_info(self, user: User) -> dict:
-        """
-        Get information about user's undo limits and usage.
-
-        Args:
-            user: User instance
-
-        Returns:
-            Dictionary with limit information
-
-        Example:
-            info = service.get_undo_limit_info(user)
-            print(f"Used {info['used_today']} of {info['daily_limit']}")
-        """
-        daily_limit = self.get_daily_limit(user)
-        remaining = self.get_remaining_daily_undos(user)
-
-        return {
-            "daily_limit": daily_limit,
-            "used_today": user.daily_undo_count,
-            "remaining_today": remaining,
-            "is_premium": user.is_premium
-        }

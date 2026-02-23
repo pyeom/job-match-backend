@@ -156,3 +156,10 @@ class PaginatedResponse(BaseModel, Generic[T]):
     total: int
     page: Optional[int] = None
     limit: Optional[int] = None
+
+
+class CursorPaginatedResponse(BaseModel, Generic[T]):
+    """Generic cursor-based (keyset) paginated response"""
+    items: List[T]
+    next_cursor: Optional[str] = None
+    has_next: bool = False

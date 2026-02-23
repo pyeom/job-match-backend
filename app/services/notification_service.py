@@ -10,7 +10,7 @@ from typing import Optional
 from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-import logging
+import structlog
 import math
 from datetime import datetime
 
@@ -24,7 +24,7 @@ from app.repositories.job_repository import JobRepository
 from app.core.websocket_manager import connection_manager
 from app.services.push_notification_service import PushNotificationService
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class NotificationService:
@@ -122,7 +122,7 @@ class NotificationService:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error getting notifications for user {user_id}: {e}")
+            logger.error("get_notifications_failed", user_id=str(user_id), error=str(e))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to retrieve notifications"
@@ -186,7 +186,7 @@ class NotificationService:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error getting notifications for company {company_id}: {e}")
+            logger.error("get_notifications_failed", company_id=str(company_id), error=str(e))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to retrieve notifications"
@@ -243,7 +243,7 @@ class NotificationService:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error marking notification {notification_id} as read: {e}")
+            logger.error("mark_read_failed", notification_id=str(notification_id), error=str(e))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to mark notification as read"
@@ -294,7 +294,7 @@ class NotificationService:
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error marking company notification {notification_id} as read: {e}")
+            logger.error("mark_read_failed", notification_id=str(notification_id), error=str(e))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to mark notification as read"
@@ -325,7 +325,7 @@ class NotificationService:
             return {"updated_count": count}
 
         except Exception as e:
-            logger.error(f"Error marking all notifications as read for user {user_id}: {e}")
+            logger.error("mark_all_read_failed", user_id=str(user_id), error=str(e))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to mark all notifications as read"
@@ -351,7 +351,7 @@ class NotificationService:
             return {"updated_count": count}
 
         except Exception as e:
-            logger.error(f"Error marking all notifications as read for company {company_id}: {e}")
+            logger.error("mark_all_read_failed", company_id=str(company_id), error=str(e))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to mark all notifications as read"
@@ -383,23 +383,23 @@ class NotificationService:
             await db.commit()
         """
         try:
-            logger.info(f"Creating status change notification for application {application_id}: {old_stage} -> {new_stage}")
+            logger.info("creating_status_notification", application_id=str(application_id), old_stage=old_stage, new_stage=new_stage)
 
             # Get application with related data
             application = await self.application_repo.get(db, application_id)
             if not application:
-                logger.error(f"Cannot create notification: Application {application_id} not found in database")
+                logger.error("notification_skipped", reason="application_not_found", application_id=str(application_id))
                 return None
 
             # Get job details
             job = await self.job_repo.get(db, application.job_id)
             if not job:
-                logger.error(f"Cannot create notification: Job {application.job_id} not found in database")
+                logger.error("notification_skipped", reason="job_not_found", job_id=str(application.job_id))
                 return None
 
             # Verify company relationship is loaded
             if not job.company:
-                logger.error(f"Cannot create notification: Job {job.id} has no company relationship loaded")
+                logger.error("notification_skipped", reason="company_not_loaded", job_id=str(job.id))
                 return None
 
             # Generate notification message based on stage transition
@@ -414,10 +414,7 @@ class NotificationService:
                 application_id=application.id,
             )
             if duplicate:
-                logger.info(
-                    f"Skipping duplicate APPLICATION_UPDATE notification for "
-                    f"application {application_id} (existing id={duplicate.id})"
-                )
+                logger.info("notification_deduplicated", type="APPLICATION_UPDATE", application_id=str(application_id), existing_id=str(duplicate.id))
                 return duplicate
 
             # Create notification for the job seeker
@@ -433,7 +430,7 @@ class NotificationService:
 
             notification = await self.notification_repo.create_notification(db, notification_data)
 
-            logger.info(f"Successfully created notification {notification.id} for user {application.user_id} about application {application_id} status change")
+            logger.info("notification_created", notification_id=str(notification.id), user_id=str(application.user_id), application_id=str(application_id))
 
             # Send real-time WebSocket notification
             try:
@@ -456,7 +453,7 @@ class NotificationService:
                     ws_payload
                 )
             except Exception as ws_error:
-                logger.error(f"[NotificationService] Failed to send WebSocket notification to user {application.user_id}: {ws_error}", exc_info=True)
+                logger.error("websocket_send_failed", user_id=str(application.user_id), error=str(ws_error))
 
             # Enqueue push notification (avoids blocking request thread on Expo API)
             try:
@@ -476,13 +473,13 @@ class NotificationService:
                     },
                 )
             except Exception as push_error:
-                logger.warning(f"Failed to enqueue push notification for user: {push_error}")
+                logger.warning("push_enqueue_failed", target="user", error=str(push_error))
 
             return notification
 
         except Exception as e:
             # Log but don't raise - notification failures shouldn't block the main operation
-            logger.error(f"Failed to create status notification for application {application_id}: {e}", exc_info=True)
+            logger.error("notification_failed", application_id=str(application_id), error=str(e), exc_info=True)
             return None
 
     async def create_new_application_notification(
@@ -505,28 +502,28 @@ class NotificationService:
             await db.commit()
         """
         try:
-            logger.info(f"Creating new application notification for application {application_id}")
+            logger.info("creating_new_application_notification", application_id=str(application_id))
 
             # Get application with related data - the repo loads user and job relationships
             application = await self.application_repo.get(db, application_id)
             if not application:
-                logger.error(f"Cannot create notification: Application {application_id} not found in database")
+                logger.error("notification_skipped", reason="application_not_found", application_id=str(application_id))
                 return None
 
             # Verify user relationship is loaded
             if not application.user:
-                logger.error(f"Cannot create notification: Application {application_id} has no user relationship loaded")
+                logger.error("notification_skipped", reason="user_not_loaded", application_id=str(application_id))
                 return None
 
             # Get job and user details
             job = await self.job_repo.get(db, application.job_id)
             if not job:
-                logger.error(f"Cannot create notification: Job {application.job_id} not found in database")
+                logger.error("notification_skipped", reason="job_not_found", job_id=str(application.job_id))
                 return None
 
             # Verify company relationship is loaded
             if not job.company:
-                logger.error(f"Cannot create notification: Job {job.id} has no company relationship loaded")
+                logger.error("notification_skipped", reason="company_not_loaded", job_id=str(job.id))
                 return None
 
             # Create notification for the company
@@ -542,10 +539,7 @@ class NotificationService:
                 application_id=application.id,
             )
             if duplicate:
-                logger.info(
-                    f"Skipping duplicate NEW_APPLICATION notification for "
-                    f"application {application_id} (existing id={duplicate.id})"
-                )
+                logger.info("notification_deduplicated", type="NEW_APPLICATION", application_id=str(application_id), existing_id=str(duplicate.id))
                 return duplicate
 
             notification_data = {
@@ -560,7 +554,7 @@ class NotificationService:
 
             notification = await self.notification_repo.create_notification(db, notification_data)
 
-            logger.info(f"Successfully created notification {notification.id} for company {job.company_id} about application {application_id}")
+            logger.info("notification_created", notification_id=str(notification.id), company_id=str(job.company_id), application_id=str(application_id))
 
             # Send real-time WebSocket notification to company
             try:
@@ -583,7 +577,7 @@ class NotificationService:
                     ws_payload
                 )
             except Exception as ws_error:
-                logger.error(f"[NotificationService] Failed to send WebSocket notification to company {job.company_id}: {ws_error}", exc_info=True)
+                logger.error("websocket_send_failed", company_id=str(job.company_id), error=str(ws_error))
 
             # Enqueue push notification to company (avoids blocking request thread on Expo API)
             try:
@@ -603,13 +597,13 @@ class NotificationService:
                     },
                 )
             except Exception as push_error:
-                logger.warning(f"Failed to enqueue push notification for company: {push_error}")
+                logger.warning("push_enqueue_failed", target="company", error=str(push_error))
 
             return notification
 
         except Exception as e:
             # Log but don't raise - notification failures shouldn't block the main operation
-            logger.error(f"Failed to create new application notification for {application_id}: {e}", exc_info=True)
+            logger.error("notification_failed", application_id=str(application_id), error=str(e), exc_info=True)
             return None
 
     def _generate_stage_change_message(

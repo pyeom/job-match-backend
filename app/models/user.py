@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Text, ForeignKey, Enum, Boolean, Date
+from sqlalchemy import Column, String, DateTime, JSON, Text, ForeignKey, Enum
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -43,11 +43,6 @@ class User(Base):
 
     # Localization
     timezone = Column(String(64), nullable=True, default="UTC")
-
-    # Subscription and undo tracking
-    is_premium = Column(Boolean, default=False, nullable=False)
-    daily_undo_count = Column(Integer, default=0, nullable=False)
-    undo_count_reset_date = Column(Date, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=func.now())

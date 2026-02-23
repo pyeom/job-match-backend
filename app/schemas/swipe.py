@@ -44,15 +44,6 @@ class UndoResponse(BaseModel):
     swipe_id: uuid.UUID
     job_id: uuid.UUID
     undone_at: datetime
-    remaining_daily_undos: int
-
-
-class UndoLimitInfo(BaseModel):
-    """Information about user's undo limits and usage"""
-    daily_limit: int
-    used_today: int
-    remaining_today: int
-    is_premium: bool
 
 
 class RejectedJobItem(BaseModel):
