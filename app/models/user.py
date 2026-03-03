@@ -31,6 +31,7 @@ class User(Base):
     bio = Column(Text)  # User biography/summary
     skills = Column(JSON)  # List of skills
     preferred_locations = Column(JSON)  # List of preferred locations
+    work_arrangement = Column(JSON)  # List of preferred work arrangements (Remote, Hybrid, On-site)
     seniority = Column(String(50))  # Junior, Mid, Senior, Lead, etc.
     phone = Column(String(20))  # Phone number
     experience = Column(JSON)  # List of work experience objects

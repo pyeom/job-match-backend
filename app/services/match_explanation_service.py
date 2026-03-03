@@ -63,6 +63,8 @@ class MatchExplanationService:
     ) -> MatchFactorExplanation:
         """Generate explanation for skill overlap"""
 
+        missing_skills_display: Optional[List[str]] = None
+
         if not user_skills or not job_tags:
             explanation = "Skill comparison not available due to incomplete profile or job data."
             details = "Missing skill information"
@@ -79,6 +81,8 @@ class MatchExplanationService:
                 skill for skill in job_tags
                 if skill.lower() in common_skills
             ]
+
+            missing_skills_display = [tag for tag in job_tags if tag.lower() not in common_skills]
 
             if score >= 0.8:
                 explanation = (
@@ -118,7 +122,8 @@ class MatchExplanationService:
             weight=weight,
             weighted_contribution=score * weight,
             explanation=explanation,
-            details=details
+            details=details,
+            missing_skills=missing_skills_display
         )
 
     @staticmethod
