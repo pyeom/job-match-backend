@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 import uuid
 
 
@@ -10,6 +10,7 @@ class MatchFactorExplanation(BaseModel):
     weighted_contribution: float = Field(..., ge=0.0, le=1.0, description="Contribution to final score (score * weight)")
     explanation: str = Field(..., description="Natural language explanation of this factor")
     details: Optional[str] = None
+    missing_skills: Optional[List[str]] = None
 
 
 class MatchExplanation(BaseModel):

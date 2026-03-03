@@ -43,7 +43,7 @@ async def update_current_user_legacy(
     update_data = user_update.model_dump(exclude_unset=True)
 
     # JSON/array columns that need explicit flagging for SQLAlchemy to detect changes
-    json_fields = {'skills', 'experience', 'education', 'preferred_locations'}
+    json_fields = {'skills', 'experience', 'education', 'preferred_locations', 'work_arrangement'}
 
     for field, value in update_data.items():
         setattr(user, field, value)
@@ -116,7 +116,7 @@ async def update_user_profile(
     update_data = user_update.model_dump(exclude_unset=True)
 
     # JSON/array columns that need explicit flagging for SQLAlchemy to detect changes
-    json_fields = {'skills', 'experience', 'education', 'preferred_locations'}
+    json_fields = {'skills', 'experience', 'education', 'preferred_locations', 'work_arrangement'}
 
     for field, value in update_data.items():
         setattr(user, field, value)

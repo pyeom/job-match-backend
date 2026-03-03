@@ -32,6 +32,7 @@ class UserBase(BaseModel):
     phone: Optional[str] = None
     skills: Optional[List[str]] = None
     preferred_locations: Optional[List[str]] = None
+    work_arrangement: Optional[List[str]] = None
     seniority: Optional[str] = None
     role: UserRole = UserRole.JOB_SEEKER
     avatar_url: Optional[str] = None
@@ -50,6 +51,7 @@ class UserUpdate(BaseModel):
     phone: Optional[str] = None
     skills: Optional[List[str]] = None
     preferred_locations: Optional[List[str]] = None
+    work_arrangement: Optional[List[str]] = None
     seniority: Optional[str] = None
     experience: Optional[List[Dict[str, Any]]] = None
     education: Optional[List[Dict[str, Any]]] = None

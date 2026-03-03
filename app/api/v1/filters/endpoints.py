@@ -24,9 +24,13 @@ from app.schemas.search import (
     RecentSearch
 )
 from app.services.search_service import search_service
+from app.services.resume_parser.esco_skill_matcher import EscoSkillMatcher
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Module-level singleton for EscoSkillMatcher — loaded once at startup.
+_esco_matcher = EscoSkillMatcher()
 
 router = APIRouter()
 
@@ -271,6 +275,55 @@ async def get_skill_suggestions(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch skill suggestions"
         )
+
+
+@router.get("/suggestions/esco-skills", response_model=List[str])
+async def get_esco_skill_suggestions(
+    query: str = Query(..., min_length=1, max_length=100),
+    limit: int = Query(20, ge=1, le=50),
+):
+    """
+    Get ESCO skill autocomplete suggestions.
+
+    Searches the ESCO skills taxonomy using a case-insensitive substring
+    match against the skill labels. No authentication is required because
+    ESCO skill names are public data.
+
+    Results are ordered by label length (shortest first) so that more
+    specific, targeted matches appear before longer compound phrases.
+
+    Args:
+        query: Search string to match against ESCO skill labels (1-100 chars)
+        limit: Maximum number of suggestions to return (default: 20, max: 50)
+
+    Returns:
+        List of matching ESCO skill label strings, ordered by length ascending.
+        Returns an empty list when the ESCO index is unavailable.
+    """
+    try:
+        _esco_matcher._load_index()
+
+        if _esco_matcher._index is None:
+            return []
+
+        query_lower = query.lower()
+        labels: List[str] = _esco_matcher._index["labels"]
+        labels_lower: List[str] = _esco_matcher._index["labels_lower"]
+
+        matches: List[str] = [
+            labels[i]
+            for i, label_lower in enumerate(labels_lower)
+            if query_lower in label_lower
+        ]
+
+        # Order by label length — shorter labels are more specific matches
+        matches.sort(key=lambda s: len(s))
+
+        return matches[:limit]
+
+    except Exception as e:
+        logger.error(f"Error fetching ESCO skill suggestions: {e}")
+        return []
 
 
 @router.get("/recent-searches", response_model=List[RecentSearch])

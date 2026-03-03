@@ -197,6 +197,10 @@ async def get_job_applications(
     if status_filter:
         query = query.where(Application.status == status_filter)
 
+    query = query.where(
+        or_(Application.rejection_reason != 'Withdrawn by applicant', Application.rejection_reason.is_(None))
+    )
+
     # Apply keyset cursor filter
     if c_created_at is not None and c_id is not None:
         query = _apply_application_cursor_filter(query, c_score, c_created_at, c_id)
@@ -466,6 +470,10 @@ async def get_all_company_applications(
 
     if status_filter:
         query = query.where(Application.status == status_filter)
+
+    query = query.where(
+        or_(Application.rejection_reason != 'Withdrawn by applicant', Application.rejection_reason.is_(None))
+    )
 
     if seniority_filter:
         query = query.where(User.seniority == seniority_filter)
