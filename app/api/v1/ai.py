@@ -5,7 +5,7 @@ This module provides AI-driven features like match explanations
 and personalized insights.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, Body, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID
 import logging
@@ -13,6 +13,7 @@ import logging
 from app.core.database import get_db
 from app.api.deps import get_current_user
 from app.models.user import User
+from app.services.rate_limit_service import rate_limit_service
 from app.repositories.job_repository import JobRepository
 from app.repositories.document_repository import DocumentRepository
 from app.schemas.match_explanation import MatchExplanation
@@ -34,6 +35,7 @@ router = APIRouter()
 
 @router.get("/match-explanation", response_model=MatchExplanation)
 async def get_match_explanation(
+    request: Request,
     job_id: UUID = Query(..., description="UUID of the job to explain"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
@@ -67,6 +69,18 @@ async def get_match_explanation(
     - Job must exist and be active
     - User must have a profile embedding for best results
     """
+    # Rate limit: 10 AI requests per minute per user
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"ai:user:{current_user.id}",
+        max_requests=10,
+        window_seconds=60,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many AI requests. Please wait before requesting more.",
+            headers={"Retry-After": str(retry_after)},
+        )
 
     # Get job with company information
     job_repo = JobRepository()
@@ -160,6 +174,18 @@ async def get_interview_questions(
     - User must be authenticated
     - Job must exist and be active
     """
+    # Rate limit: 10 AI requests per minute per user (shared bucket with other AI endpoints)
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"ai:user:{current_user.id}",
+        max_requests=10,
+        window_seconds=60,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many AI requests. Please wait before requesting more.",
+            headers={"Retry-After": str(retry_after)},
+        )
 
     # Get job with company information
     job_repo = JobRepository()
@@ -238,6 +264,18 @@ async def review_resume(
         - Document must be a resume type
         - Document must have extractable text content
     """
+    # Rate limit: 10 AI requests per minute per user (shared bucket with other AI endpoints)
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"ai:user:{current_user.id}",
+        max_requests=10,
+        window_seconds=60,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many AI requests. Please wait before requesting more.",
+            headers={"Retry-After": str(retry_after)},
+        )
 
     # Get the document
     doc_repo = DocumentRepository()
@@ -380,6 +418,18 @@ async def parse_resume(
         - Document must be of type 'resume'
         - Document must have extractable text content
     """
+    # Rate limit: 10 AI requests per minute per user (shared bucket with other AI endpoints)
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"ai:user:{current_user.id}",
+        max_requests=10,
+        window_seconds=60,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many AI requests. Please wait before requesting more.",
+            headers={"Retry-After": str(retry_after)},
+        )
 
     # Get the document
     doc_repo = DocumentRepository()

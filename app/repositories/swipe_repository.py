@@ -82,6 +82,38 @@ class SwipeRepository(BaseRepository[Swipe]):
             logger.error(f"Error fetching last swipe for user {user_id}: {e}")
             raise
 
+    async def get_undoable_swipes(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        undo_window_seconds: int = 120
+    ) -> list[Swipe]:
+        """
+        Get all non-undone swipes made within the undo window, newest first.
+        Used by the /undoable endpoint to tell the frontend which swipes are still reversible.
+        """
+        try:
+            cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=undo_window_seconds)
+
+            stmt = (
+                select(Swipe)
+                .where(
+                    and_(
+                        Swipe.user_id == user_id,
+                        Swipe.is_undone == False,
+                        Swipe.created_at >= cutoff_time
+                    )
+                )
+                .order_by(desc(Swipe.created_at))
+            )
+
+            result = await db.execute(stmt)
+            return list(result.scalars().all())
+
+        except SQLAlchemyError as e:
+            logger.error(f"Error fetching undoable swipes for user {user_id}: {e}")
+            raise
+
     async def get_with_job(
         self,
         db: AsyncSession,

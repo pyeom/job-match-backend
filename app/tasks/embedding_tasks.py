@@ -89,6 +89,10 @@ async def update_user_embedding(ctx: dict, user_id: str) -> None:
             db_user.profile_embedding = updated_embedding
             await db.commit()
 
+            # Invalidate user cache so the updated embedding is used on next discover request
+            from app.core.cache import invalidate_user_cache
+            await invalidate_user_cache(user_id)
+
             logger.info(
                 f"Updated embedding for user {user_id} after {right_swipe_count} right swipes"
             )

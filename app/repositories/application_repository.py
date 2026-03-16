@@ -107,7 +107,7 @@ class ApplicationRepository(BaseRepository[Application]):
             # Build base query with user relationship loaded
             query = (
                 select(Application)
-                .where(Application.job_id == job_id)
+                .where(Application.job_id == job_id, Application.status != "PENDING")
                 .options(selectinload(Application.user))
                 .order_by(desc(Application.created_at))
             )
@@ -122,7 +122,9 @@ class ApplicationRepository(BaseRepository[Application]):
             applications = list(result.scalars().all())
 
             # Get total count with same filters
-            count_query = select(func.count()).select_from(Application).where(Application.job_id == job_id)
+            count_query = select(func.count()).select_from(Application).where(
+                Application.job_id == job_id, Application.status != "PENDING"
+            )
             if status_filter:
                 count_query = count_query.where(Application.status == status_filter)
 
@@ -166,7 +168,7 @@ class ApplicationRepository(BaseRepository[Application]):
             query = (
                 select(Application)
                 .join(Job, Application.job_id == Job.id)
-                .where(Job.company_id == company_id)
+                .where(Job.company_id == company_id, Application.status != "PENDING")
                 .options(
                     selectinload(Application.user),
                     selectinload(Application.job)
@@ -188,7 +190,7 @@ class ApplicationRepository(BaseRepository[Application]):
                 select(func.count())
                 .select_from(Application)
                 .join(Job, Application.job_id == Job.id)
-                .where(Job.company_id == company_id)
+                .where(Job.company_id == company_id, Application.status != "PENDING")
             )
             if status_filter:
                 count_query = count_query.where(Application.status == status_filter)
@@ -261,7 +263,7 @@ class ApplicationRepository(BaseRepository[Application]):
                         case((Application.status == 'REJECTED', 1), else_=0)
                     ).label('rejected')
                 )
-                .where(Application.job_id.in_(job_ids))
+                .where(Application.job_id.in_(job_ids), Application.status != "PENDING")
                 .group_by(Application.job_id)
             )
 
@@ -333,7 +335,7 @@ class ApplicationRepository(BaseRepository[Application]):
                     Application.created_at
                 )
                 .join(User, Application.user_id == User.id)
-                .where(Application.job_id == job_id)
+                .where(Application.job_id == job_id, Application.status != "PENDING")
                 .order_by(desc(Application.created_at))
                 .limit(limit)
             )
@@ -413,7 +415,7 @@ class ApplicationRepository(BaseRepository[Application]):
                 )
                 .select_from(Application)
                 .join(Job, Application.job_id == Job.id)
-                .where(Job.company_id == company_id)
+                .where(Job.company_id == company_id, Application.status != "PENDING")
             )
 
             result = await db.execute(query)

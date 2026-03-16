@@ -2,12 +2,15 @@ import logging
 
 import httpx
 from arq.connections import RedisSettings
+from arq import cron
 
 from app.core.config import settings
 from app.tasks.embedding_tasks import update_user_embedding
 from app.tasks.notification_tasks import deliver_push_notification
 from app.tasks.document_tasks import parse_resume_and_update_profile
 from app.tasks.elasticsearch_tasks import reindex_all_jobs
+from app.tasks.application_tasks import finalize_pending_application
+from app.tasks.auth_tasks import cleanup_expired_sessions
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +20,7 @@ async def on_startup(ctx: dict) -> None:
     logger.info(
         "ARQ worker started. Functions: update_user_embedding, "
         "deliver_push_notification, parse_resume_and_update_profile, "
-        "reindex_all_jobs"
+        "reindex_all_jobs, finalize_pending_application, cleanup_expired_sessions"
     )
 
 
@@ -34,6 +37,11 @@ class WorkerSettings:
         deliver_push_notification,
         parse_resume_and_update_profile,
         reindex_all_jobs,
+        finalize_pending_application,
+        cleanup_expired_sessions,
+    ]
+    cron_jobs = [
+        cron(cleanup_expired_sessions, hour={0, 6, 12, 18}, minute=0),
     ]
     redis_settings = RedisSettings.from_dsn(settings.redis_url)
     max_jobs = 10

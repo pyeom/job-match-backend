@@ -3,6 +3,8 @@ Document validation and processing service.
 Handles document validation, MIME type checking, file size limits, and basic security checks.
 """
 import io
+import math
+from collections import Counter
 from typing import Optional, Tuple
 from fastapi import UploadFile, HTTPException, status
 import magic
@@ -219,13 +221,43 @@ class DocumentService:
                     detail="Suspicious file content detected. File rejected for security reasons."
                 )
 
-        # 2. For PDFs, block JavaScript content
-        if mime_type == "application/pdf":
-            if b'/JavaScript' in content or b'/JS ' in content:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Document contains JavaScript and was rejected for security reasons."
-                )
+        # Entropy check: fully encrypted or obfuscated payloads have near-maximum Shannon
+        # entropy (≈ 8 bits/byte). Legitimate documents — even with compressed internal
+        # streams — stay well below 7.95. Files above this threshold are rejected as they
+        # cannot be valid plain documents and are likely encrypted payloads or random data.
+        self._entropy_check(content)
+
+        # PDF JavaScript scanning via raw byte search was removed — it is bypassable via
+        # stream encoding (FlateDecode) and name obfuscation. ClamAV (_scan_for_viruses)
+        # provides the actual malware defense. Files are never rendered server-side,
+        # limiting the blast radius of any malicious PDF that passes through.
+
+    def _entropy_check(self, content: bytes) -> None:
+        """
+        Reject files whose Shannon entropy is suspiciously high.
+
+        Fully encrypted or randomised payloads approach 8 bits/byte.
+        Legitimate documents — even those containing compressed internal streams
+        (e.g. PDF FlateDecode) — typically stay below 7.95 bits/byte.
+
+        Args:
+            content: File content bytes
+
+        Raises:
+            HTTPException: If the file appears to be encrypted or obfuscated
+        """
+        if not content:
+            return
+
+        counts = Counter(content)
+        total = len(content)
+        entropy = -sum((c / total) * math.log2(c / total) for c in counts.values())
+
+        if entropy > 7.95:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File content appears to be encrypted or obfuscated and cannot be accepted."
+            )
 
     async def _scan_for_viruses(self, content: bytes) -> None:
         """

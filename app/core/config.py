@@ -1,6 +1,6 @@
 import logging
 import warnings
-from typing import List
+from typing import List, Optional
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 import os
@@ -62,6 +62,20 @@ class Settings(BaseSettings):
     embedding_profile_weight: float = Field(default=0.3, env="EMBEDDING_PROFILE_WEIGHT")
     embedding_history_weight: float = Field(default=0.7, env="EMBEDDING_HISTORY_WEIGHT")
 
+    # S3 / Object Storage Configuration (optional — falls back to local storage)
+    s3_endpoint_url: Optional[str] = Field(default=None, env="S3_ENDPOINT_URL")
+    s3_access_key_id: Optional[str] = Field(default=None, env="S3_ACCESS_KEY_ID")
+    s3_secret_access_key: Optional[str] = Field(default=None, env="S3_SECRET_ACCESS_KEY")
+    s3_bucket_name: Optional[str] = Field(default=None, env="S3_BUCKET_NAME")
+    s3_region: str = Field(default="us-east-1", env="S3_REGION")
+
+    # CDN base URL — when set, media URLs point here instead of the API
+    media_cdn_url: Optional[str] = Field(default=None, env="MEDIA_CDN_URL")
+
+    @property
+    def use_s3(self) -> bool:
+        return bool(self.s3_bucket_name and self.s3_access_key_id and self.s3_secret_access_key)
+
     @model_validator(mode="after")
     def validate_production_requirements(self) -> "Settings":
         is_production = self.app_env == "production"
@@ -101,6 +115,17 @@ class Settings(BaseSettings):
     @property
     def database_url(self) -> str:
         return f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+
+    # Email / SMTP Configuration
+    smtp_host: str = Field(default="", env="SMTP_HOST")
+    smtp_port: int = Field(default=587, env="SMTP_PORT")
+    smtp_user: str = Field(default="", env="SMTP_USER")
+    smtp_password: str = Field(default="", env="SMTP_PASSWORD")
+    smtp_from: str = Field(default="noreply@job-match.cl", env="SMTP_FROM")
+    smtp_tls: bool = Field(default=True, env="SMTP_TLS")
+
+    # Public URL used in verification email links
+    frontend_url: str = Field(default="http://localhost:8081", env="FRONTEND_URL")
 
     # CORS - allow frontend origins (filter out None values).
     # Both "localhost" and "127.0.0.1" variants are included because browsers

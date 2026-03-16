@@ -1,27 +1,33 @@
 """
 Media file serving endpoints.
 Serves uploaded avatar images and other media files.
+When MEDIA_CDN_URL is configured, redirects to the CDN instead of serving locally.
 """
-from fastapi import APIRouter, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import FileResponse, Response, RedirectResponse
 from pathlib import Path
 import uuid
+
+from app.core.config import settings
 
 
 router = APIRouter()
 
 
 @router.get("/avatars/{user_id}/{filename}")
-async def serve_avatar(user_id: uuid.UUID, filename: str):
+async def serve_avatar(user_id: uuid.UUID, filename: str, request: Request):
     """
     Serve avatar image files.
+
+    When MEDIA_CDN_URL is configured, issues a permanent redirect to the CDN URL.
+    Otherwise serves the file directly from local storage.
 
     Args:
         user_id: The user's UUID
         filename: The avatar filename
 
     Returns:
-        FileResponse with the image file
+        RedirectResponse to CDN (when configured) or FileResponse with the image file
 
     Raises:
         HTTPException: If file not found or invalid filename
@@ -33,10 +39,15 @@ async def serve_avatar(user_id: uuid.UUID, filename: str):
             detail="Invalid filename"
         )
 
-    # Construct file path
+    # When CDN is configured, redirect there instead of serving locally
+    if settings.media_cdn_url:
+        cdn = settings.media_cdn_url.rstrip("/")
+        cdn_url = f"{cdn}/avatars/{user_id}/{filename}"
+        return RedirectResponse(url=cdn_url, status_code=status.HTTP_301_MOVED_PERMANENTLY)
+
+    # Local file serving
     file_path = Path("uploads") / "avatars" / str(user_id) / filename
 
-    # Check if file exists
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -59,12 +70,20 @@ async def serve_avatar(user_id: uuid.UUID, filename: str):
             detail="Error accessing file"
         )
 
-    # Serve the file
-    # FastAPI will automatically set the correct Content-Type based on file extension
+    # Compute ETag from file size + modification time
+    stat = file_path.stat()
+    etag = f'"{stat.st_size}-{int(stat.st_mtime)}"'
+
+    # Handle conditional GET (If-None-Match)
+    if_none_match = request.headers.get("If-None-Match")
+    if if_none_match and if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag, "Cache-Control": "public, max-age=86400"})
+
     return FileResponse(
         path=file_path,
         media_type="image/webp",
         headers={
-            "Cache-Control": "public, max-age=86400",  # Cache for 24 hours
+            "Cache-Control": "public, max-age=86400",
+            "ETag": etag,
         }
     )

@@ -1,7 +1,8 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List, Dict, Generic, TypeVar
 from datetime import datetime
 import uuid
+from app.utils.sanitize import sanitize_plain_text, sanitize_rich_text
 
 T = TypeVar('T')
 
@@ -13,6 +14,21 @@ class CompanyBase(BaseModel):
     industry: Optional[str] = None
     size: Optional[str] = None
     location: Optional[str] = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def sanitize_name(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def sanitize_description(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_rich_text(v)
+
+    @field_validator("location", mode="before")
+    @classmethod
+    def sanitize_location(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
 
 
 class CompanyCreate(CompanyBase):
@@ -27,6 +43,21 @@ class CompanyUpdate(BaseModel):
     size: Optional[str] = None
     location: Optional[str] = None
     is_active: Optional[bool] = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def sanitize_name(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def sanitize_description(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_rich_text(v)
+
+    @field_validator("location", mode="before")
+    @classmethod
+    def sanitize_location(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
 
 
 class CompanyInDB(CompanyBase):

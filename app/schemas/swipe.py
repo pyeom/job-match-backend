@@ -46,6 +46,23 @@ class UndoResponse(BaseModel):
     undone_at: datetime
 
 
+class UndoableSwipeItem(BaseModel):
+    """Single swipe still within the 2-minute undo window"""
+    id: uuid.UUID
+    job_id: uuid.UUID
+    direction: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class UndoableSwipesResponse(BaseModel):
+    """Response for GET /swipes/undoable — swipes the user can still reverse"""
+    swipes: List[UndoableSwipeItem]
+    count: int
+
+
 class RejectedJobItem(BaseModel):
     """Single rejected job item with full job and company details"""
     swipe_id: uuid.UUID

@@ -2,7 +2,7 @@
 Rate limiting service for API endpoints.
 
 Uses Redis sorted sets (sliding window algorithm) for distributed, accurate
-rate limiting. Falls back gracefully if Redis is unavailable.
+rate limiting. Fails closed in production when Redis is unavailable.
 
 Legacy in-memory helpers (check_rate_limit with user_id, record_request,
 cleanup_old_entries) are retained for backward compatibility but are no-ops
@@ -108,12 +108,17 @@ class RateLimitService:
             return True, 0
 
         except Exception:
-            # If Redis is unavailable, fail open rather than blocking all users.
-            logger.warning(
-                "Rate limit check failed for key '%s' — failing open",
+            logger.error(
+                "Rate limit check failed for key '%s' — Redis unavailable",
                 key,
                 exc_info=True,
             )
+            from app.core.config import settings
+
+            if settings.app_env == "production":
+                # Fail closed: reject the request to protect the system
+                return False, 60
+            # In dev/test, fail open so development is not blocked
             return True, 0
 
     # ── Legacy synchronous stubs (backward compatibility) ─────────────────────

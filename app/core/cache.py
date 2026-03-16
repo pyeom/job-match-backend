@@ -15,6 +15,7 @@ _pool: Optional[ConnectionPool] = None
 USER_CACHE_TTL = 300       # 5 minutes
 COMPANY_CACHE_TTL = 3600   # 1 hour
 JOB_CACHE_TTL = 1800       # 30 minutes
+DISCOVER_CACHE_TTL = 120   # 2 minutes
 
 
 # ── Connection pool ───────────────────────────────────────────────────────────
@@ -115,6 +116,7 @@ def _serialize_user_model(user) -> dict:
         "education": user.education,
         "avatar_url": user.avatar_url,
         "avatar_thumbnail_url": user.avatar_thumbnail_url,
+        "email_verified": bool(user.email_verified) if user.email_verified is not None else False,
         "profile_embedding": emb,
         "created_at": user.created_at.isoformat() if user.created_at else None,
         "updated_at": user.updated_at.isoformat() if user.updated_at else None,
@@ -142,6 +144,7 @@ def _deserialize_user_model(data: dict):
     user.education = data.get("education")
     user.avatar_url = data.get("avatar_url")
     user.avatar_thumbnail_url = data.get("avatar_thumbnail_url")
+    user.email_verified = data.get("email_verified", False)
     user.profile_embedding = data.get("profile_embedding")  # list of floats
 
     ca = data.get("created_at")
@@ -334,3 +337,100 @@ async def invalidate_job_cache(job_id: str) -> None:
         await r.delete(f"job:{job_id}")
     except Exception:
         logger.warning("Job cache invalidation failed for %s", job_id, exc_info=True)
+
+
+# ── Discover feed cache ────────────────────────────────────────────────────────
+
+async def get_cached_discover(user_id: str) -> Optional[str]:
+    """Return cached DiscoverResponse JSON string (first-page only), or None on miss/error."""
+    try:
+        r = await get_redis()
+        return await r.get(f"discover:{user_id}")
+    except Exception:
+        logger.warning("Discover cache read failed for %s", user_id, exc_info=True)
+    return None
+
+
+async def set_cached_discover(user_id: str, response_json: str) -> None:
+    """Cache a DiscoverResponse JSON string with a 2-minute TTL."""
+    try:
+        r = await get_redis()
+        await r.setex(f"discover:{user_id}", DISCOVER_CACHE_TTL, response_json)
+    except Exception:
+        logger.warning("Discover cache write failed for %s", user_id, exc_info=True)
+
+
+async def invalidate_discover_cache(user_id: str) -> None:
+    """Delete a user's discover feed cache."""
+    try:
+        r = await get_redis()
+        await r.delete(f"discover:{user_id}")
+    except Exception:
+        logger.warning("Discover cache invalidation failed for %s", user_id, exc_info=True)
+
+
+# ── Swiped job set ─────────────────────────────────────────────────────────────
+# Redis Set `swiped:{user_id}` keeps job IDs the user has already swiped on.
+# This lets the discover endpoint post-filter ES candidates in Python without
+# passing a large `must_not: terms` list into the kNN query.
+
+SWIPED_SET_TTL = 86400  # 24 hours
+
+
+async def get_swiped_set(user_id: str) -> Optional[set]:
+    """Return the cached set of swiped job IDs, or None on cache miss/error.
+
+    None means the key does not exist in Redis and the caller should rebuild
+    it from PostgreSQL.  An empty ``set()`` means the user has no swipes.
+    """
+    try:
+        r = await get_redis()
+        key = f"swiped:{user_id}"
+        if not await r.exists(key):
+            return None
+        return await r.smembers(key)
+    except Exception:
+        logger.warning("Swiped set read failed for %s", user_id, exc_info=True)
+        return None
+
+
+async def populate_swiped_set(user_id: str, job_ids: list) -> None:
+    """Atomically replace the swiped set with a fresh list from PostgreSQL."""
+    try:
+        r = await get_redis()
+        key = f"swiped:{user_id}"
+        async with r.pipeline() as pipe:
+            pipe.delete(key)
+            if job_ids:
+                pipe.sadd(key, *job_ids)
+                pipe.expire(key, SWIPED_SET_TTL)
+            await pipe.execute()
+    except Exception:
+        logger.warning("Swiped set populate failed for %s", user_id, exc_info=True)
+
+
+async def add_to_swiped_set(user_id: str, job_id: str) -> None:
+    """Add a job_id to the swiped set, but only if the set is already cached.
+
+    When the set is absent (cache miss), we skip the add so we don't create
+    a partial set — the next discover request will rebuild it from PG.
+    """
+    try:
+        r = await get_redis()
+        key = f"swiped:{user_id}"
+        if await r.exists(key):
+            await r.sadd(key, job_id)
+            await r.expire(key, SWIPED_SET_TTL)
+    except Exception:
+        logger.warning("Swiped set add failed for %s", user_id, exc_info=True)
+
+
+async def remove_from_swiped_set(user_id: str, job_id: str) -> None:
+    """Remove a job_id from the swiped set after an undo, if the set is cached."""
+    try:
+        r = await get_redis()
+        key = f"swiped:{user_id}"
+        if await r.exists(key):
+            await r.srem(key, job_id)
+    except Exception:
+        logger.warning("Swiped set remove failed for %s", user_id, exc_info=True)

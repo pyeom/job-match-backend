@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_MAX_WS_MESSAGE_BYTES = 4096  # 4 KB — generous for control messages (ping/pong)
+
 
 async def authenticate_websocket(token: str, db: AsyncSession) -> Optional[tuple[str, UUID]]:
     """
@@ -206,7 +208,23 @@ async def websocket_endpoint(websocket: WebSocket):
         # Listen for messages
         while True:
             try:
-                message = await websocket.receive_json()
+                raw = await websocket.receive_text()
+                if len(raw.encode("utf-8")) > _MAX_WS_MESSAGE_BYTES:
+                    logger.warning(
+                        "WebSocket message too large (%d bytes) from %s=%s",
+                        len(raw.encode("utf-8")), owner_type, owner_id,
+                    )
+                    await websocket.close(code=1009, reason="Message too large")
+                    break
+                try:
+                    message = json.loads(raw)
+                except json.JSONDecodeError:
+                    await websocket.send_json({
+                        "type": "error",
+                        "code": "INVALID_MESSAGE_FORMAT",
+                        "message": "Message must be valid JSON",
+                    })
+                    continue
 
                 # Rate limiting: max 20 messages per 60 seconds
                 now = time.monotonic()
@@ -231,12 +249,6 @@ async def websocket_endpoint(websocket: WebSocket):
             except WebSocketDisconnect:
                 logger.info(f"WebSocket disconnected: {owner_type}={owner_id}")
                 break
-            except json.JSONDecodeError:
-                await websocket.send_json({
-                    "type": "error",
-                    "code": "INVALID_MESSAGE_FORMAT",
-                    "message": "Message must be valid JSON"
-                })
             except Exception as e:
                 logger.error(f"Error processing WebSocket message: {e}")
                 break
@@ -265,7 +277,8 @@ async def send_heartbeat(websocket: WebSocket, interval: int = 30):
 
     Re-validation runs every `interval` seconds (default 30s), which ensures:
     - A blacklisted token (e.g. after logout) causes disconnection within 30s.
-    - A naturally expired access token causes disconnection within 30s.
+    - Token expiry is NOT checked — the WS session stays alive as long as the
+      token has not been explicitly revoked (blacklisted).
 
     Args:
         websocket: WebSocket connection

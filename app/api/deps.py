@@ -10,6 +10,7 @@ from app.core.cache import get_cached_user, set_cached_user
 from app.models.user import User, UserRole
 from app.models.company import Company
 import uuid
+import os
 
 security = HTTPBearer()
 
@@ -95,3 +96,18 @@ def require_company_access(current_user: User, company_id: uuid.UUID):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied. You can only access resources for your own company"
         )
+
+
+async def require_email_verified(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Dependency that requires the current user's email to be verified.
+
+    Returns the user unchanged if verified; raises HTTP 403 otherwise.
+    """
+    if not current_user.email_verified and not os.getenv("SKIP_EMAIL_VERIFICATION", "").lower() in ("1", "true", "yes"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email address not verified. Please check your inbox and verify your email before continuing.",
+        )
+    return current_user

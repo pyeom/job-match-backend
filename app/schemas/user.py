@@ -4,6 +4,7 @@ from datetime import datetime
 import uuid
 from app.models.user import UserRole
 from app.schemas.company import CompanyPublic
+from app.utils.sanitize import sanitize_plain_text
 
 
 class ExperienceItem(BaseModel):
@@ -39,6 +40,21 @@ class UserBase(BaseModel):
     avatar_thumbnail_url: Optional[str] = None
     timezone: Optional[str] = "UTC"
 
+    @field_validator("full_name", mode="before")
+    @classmethod
+    def sanitize_full_name(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("headline", mode="before")
+    @classmethod
+    def sanitize_headline(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("bio", mode="before")
+    @classmethod
+    def sanitize_bio(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
 
 class UserCreate(UserBase):
     password: str
@@ -57,13 +73,26 @@ class UserUpdate(BaseModel):
     education: Optional[List[Dict[str, Any]]] = None
     timezone: Optional[str] = None
 
-    @field_validator('full_name')
+    @field_validator("full_name", mode="before")
     @classmethod
-    def full_name_must_not_be_empty_if_provided(cls, v):
-        """If full_name is provided, it must not be empty or just whitespace"""
-        if v is not None and (not v or not v.strip()):
-            raise ValueError('Full name cannot be empty or just whitespace')
-        return v.strip() if v else v
+    def sanitize_and_validate_full_name(cls, v: Optional[str]) -> Optional[str]:
+        """Strip HTML from full_name, then enforce non-empty constraint."""
+        if v is None:
+            return v
+        cleaned = sanitize_plain_text(v)
+        if cleaned is not None and (not cleaned or not cleaned.strip()):
+            raise ValueError("Full name cannot be empty or just whitespace")
+        return cleaned.strip() if cleaned else cleaned
+
+    @field_validator("headline", mode="before")
+    @classmethod
+    def sanitize_headline(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("bio", mode="before")
+    @classmethod
+    def sanitize_bio(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
 
 
 class UserInDB(UserBase):
@@ -71,6 +100,7 @@ class UserInDB(UserBase):
     company_id: Optional[uuid.UUID] = None
     experience: Optional[List[Dict[str, Any]]] = None
     education: Optional[List[Dict[str, Any]]] = None
+    email_verified: bool = False
     created_at: datetime
     updated_at: Optional[datetime]
 
