@@ -148,11 +148,17 @@ class ConnectionManager:
         """
         Re-validate the JWT token stored for a connection.
 
-        Checks whether the token is still valid and not blacklisted.
-        If validation fails, closes the WebSocket with code 1008 and
-        disconnects it from the manager.
+        Only checks whether the token has been blacklisted (i.e. the user
+        explicitly logged out).  Expiry is intentionally NOT checked here
+        because the access token's short TTL is designed to limit exposure
+        of stolen tokens on new requests — not to terminate an already-
+        authenticated, live WebSocket session.  Killing the connection on
+        natural expiry would disconnect users who are actively using the app.
+
+        If the token is blacklisted the WebSocket is closed with code 1008
+        and disconnected from the manager.
         """
-        from app.core.security import verify_token
+        from app.core.security import is_token_blacklisted
 
         token = self.connection_tokens.get(websocket)
         if not token:
@@ -164,13 +170,12 @@ class ConnectionManager:
             self.disconnect(websocket)
             return False
 
-        result = await verify_token(token)
-        if result is None:
+        if await is_token_blacklisted(token):
             logger.info(
-                "[ConnectionManager] revalidate_token: token expired or revoked"
+                "[ConnectionManager] revalidate_token: token has been revoked (logout)"
             )
             try:
-                await websocket.close(code=1008, reason="Token expired or revoked")
+                await websocket.close(code=1008, reason="Token revoked")
             except Exception:
                 pass
             self.disconnect(websocket)

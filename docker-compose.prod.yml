@@ -43,6 +43,16 @@ services:
       timeout: 3s
       retries: 5
 
+  clamav:
+    image: clamav/clamav:stable
+    container_name: clamav-jobmatch
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+
   backend:
     image: ${REGISTRY:-ghcr.io/yourorg/job-match-backend}:${VERSION:-latest}
     container_name: backend-jobmatch
@@ -81,6 +91,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      clamav:
+        condition: service_healthy
 
   worker:
     image: ${REGISTRY:-ghcr.io/yourorg/job-match-backend}:${VERSION:-latest}
@@ -110,6 +122,8 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      clamav:
         condition: service_healthy
 
 volumes:

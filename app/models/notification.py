@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, ForeignKey, Boolean, Text, Enum
+from sqlalchemy import Column, Index, String, DateTime, ForeignKey, Boolean, Text, Enum, text
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -56,6 +56,11 @@ class Notification(Base):
     company = relationship("Company", foreign_keys=[company_id])
     job = relationship("Job", foreign_keys=[job_id])
     application = relationship("Application", foreign_keys=[application_id])
+
+    __table_args__ = (
+        # Unread notification list for a user, newest first (from migration n0o1p2q3r4s5)
+        Index('ix_notifications_user_unread', 'user_id', 'is_read', 'created_at'),
+    )
 
     def __repr__(self):
         recipient = f"user={self.user_id}" if self.user_id else f"company={self.company_id}"

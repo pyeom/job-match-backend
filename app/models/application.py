@@ -1,4 +1,4 @@
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text, Integer
+from sqlalchemy import Column, DateTime, ForeignKey, Index, String, Text, Integer, UniqueConstraint
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
@@ -48,5 +48,57 @@ class Application(Base):
     resume_document = relationship("Document", foreign_keys=[resume_id], back_populates="applications_as_resume")
     cover_letter_document = relationship("Document", foreign_keys=[cover_letter_id], back_populates="applications_as_cover_letter")
 
+    __table_args__ = (
+        # User's applications filtered by pipeline stage (Matches tab) (from migration q3r4s5t6u7v8)
+        Index('ix_applications_user_stage', 'user_id', 'stage'),
+        # Applications per job at a given stage (from migration n0o1p2q3r4s5)
+        Index('ix_applications_job_stage', 'job_id', 'stage'),
+    )
+
     def __repr__(self):
         return f"<Application(user_id={self.user_id}, job_id={self.job_id}, stage={self.stage}, status={self.status})>"
+
+
+class RevealedApplication(Base):
+    """Audit record that a company recruiter has revealed a candidate's identity.
+
+    One row per application — the UNIQUE constraint on ``application_id``
+    makes this a "reveal once, permanent" record.  There is intentionally no
+    soft-delete or undo path; the action is irreversible by design.
+    """
+
+    __tablename__ = "revealed_applications"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    application_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("applications.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    revealed_by_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+    revealed_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    # Snapshot of the application stage at the moment of reveal — for audit.
+    stage_at_reveal = Column(String(25), nullable=False)
+
+    # Relationships
+    application = relationship("Application", foreign_keys=[application_id])
+    revealed_by = relationship("User", foreign_keys=[revealed_by_user_id])
+
+    __table_args__ = (
+        UniqueConstraint("application_id", name="uq_revealed_applications_application_id"),
+    )
+
+    def __repr__(self):
+        return (
+            f"<RevealedApplication(application_id={self.application_id}, "
+            f"revealed_by={self.revealed_by_user_id}, at={self.revealed_at})>"
+        )

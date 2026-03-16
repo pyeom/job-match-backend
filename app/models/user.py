@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, JSON, Text, ForeignKey, Enum
+from sqlalchemy import Column, String, DateTime, JSON, Text, ForeignKey, Enum, Boolean
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -41,6 +41,9 @@ class User(Base):
 
     # ML embedding for user profile (384 dimensions for all-MiniLM-L6-v2)
     profile_embedding = Column(Vector(384))
+
+    # Email verification
+    email_verified = Column(Boolean, nullable=False, default=False)
 
     # Localization
     timezone = Column(String(64), nullable=True, default="UTC")

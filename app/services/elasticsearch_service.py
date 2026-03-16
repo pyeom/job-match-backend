@@ -161,31 +161,27 @@ class ElasticsearchService:
     async def knn_discover(
         self,
         user_embedding: list[float],
-        exclude_job_ids: list[str],
         k: int,
     ) -> list[str]:
-        """Run a kNN search over active, non-swiped jobs.
+        """Run a kNN search over active jobs, returning at most *k* job_id strings.
 
-        Returns a list of job_id strings ordered by cosine similarity
-        (highest first).  At most *k* results are returned.
+        Swiped-job exclusion is intentionally NOT done at the Elasticsearch
+        level.  Passing a large ``must_not: terms`` list forces ES into
+        post-filtering mode, which requires over-fetching and discards most
+        candidates — degrading performance for active users.
+
+        Instead, only ``is_active: true`` is applied as an ES filter.  The
+        caller post-filters the small candidate pool (``limit × 5``) against
+        the Redis ``swiped:{user_id}`` set in Python, which is O(n) on a tiny
+        list and avoids the ES overhead entirely.
         """
-        if exclude_job_ids:
-            knn_filter: dict[str, Any] = {
-                "bool": {
-                    "must": {"term": {"is_active": True}},
-                    "must_not": {"terms": {"job_id": exclude_job_ids}},
-                }
-            }
-        else:
-            knn_filter = {"term": {"is_active": True}}
-
         body: dict[str, Any] = {
             "knn": {
                 "field":          "job_embedding",
                 "query_vector":   user_embedding,
                 "k":              k,
                 "num_candidates": min(k * 5, 1000),
-                "filter":         knn_filter,
+                "filter":         {"term": {"is_active": True}},
             },
             "_source": ["job_id"],
             "size": k,

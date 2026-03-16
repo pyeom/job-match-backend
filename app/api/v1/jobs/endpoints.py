@@ -1,9 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, not_, exists
 from sqlalchemy.orm import selectinload
 from typing import List, Optional
 from app.core.database import get_db
+from app.core.cache import (
+    get_cached_discover,
+    set_cached_discover,
+    get_swiped_set,
+    populate_swiped_set,
+)
 from app.api.deps import get_current_user, get_job_seeker
 from app.models.user import User, UserRole
 from app.models.job import Job
@@ -11,6 +17,7 @@ from app.models.company import Company
 from app.schemas.job import Job as JobSchema, JobWithCompany, DiscoverResponse
 from app.schemas.search import JobSearchRequest, JobSearchResponse
 from app.services.search_service import search_service
+from app.services.rate_limit_service import rate_limit_service
 import uuid
 import base64
 import json
@@ -49,6 +56,7 @@ def decode_cursor(cursor: str) -> tuple[int, str, datetime]:
 
 @router.get("/discover", response_model=DiscoverResponse)
 async def discover_jobs(
+    request: Request,
     limit: int = Query(20, ge=1, le=50),
     cursor: Optional[str] = None,
     current_user: User = Depends(get_job_seeker),
@@ -63,6 +71,27 @@ async def discover_jobs(
     factors).  A PostgreSQL fallback is used when ES is unavailable or the
     user has no profile embedding.
     """
+    # Rate limit: 30 discover requests per minute per user
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"discover:user:{current_user.id}",
+        max_requests=30,
+        window_seconds=60,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many discover requests. Please slow down.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    # ------------------------------------------------------------------
+    # 0. Cache check — first-page requests only (no cursor)
+    # ------------------------------------------------------------------
+    if cursor is None:
+        cached_json = await get_cached_discover(str(current_user.id))
+        if cached_json:
+            return DiscoverResponse.model_validate_json(cached_json)
+
     from app.models.swipe import Swipe
     from app.services.scoring_service import scoring_service
     from app.services.elasticsearch_service import elasticsearch_service
@@ -73,16 +102,25 @@ async def discover_jobs(
         cursor_score, cursor_job_id, cursor_created_at = decode_cursor(cursor)
 
     # ------------------------------------------------------------------
-    # 1. Collect swiped job IDs (needed for both ES and PG fallback paths)
+    # 1. Swiped job set — Redis first, rebuild from PG on cache miss
     # ------------------------------------------------------------------
-    swiped_result = await db.execute(
-        select(Swipe.job_id)
-        .where(
-            Swipe.user_id == current_user.id,
-            Swipe.is_undone == False,  # noqa: E712
+    # We maintain a Redis Set `swiped:{user_id}` so we never pass a large
+    # `must_not: terms` list into the ES kNN query (which forces expensive
+    # post-filtering for active users).  Instead, ES returns the top-k
+    # active candidates and we filter in Python against the small Redis set.
+    swiped_set = await get_swiped_set(str(current_user.id))
+    if swiped_set is None:
+        # Cache miss — fetch all swiped IDs from PG and populate Redis
+        swiped_result = await db.execute(
+            select(Swipe.job_id)
+            .where(
+                Swipe.user_id == current_user.id,
+                Swipe.is_undone == False,  # noqa: E712
+            )
         )
-    )
-    swiped_job_ids = [str(row[0]) for row in swiped_result.all()]
+        swiped_job_ids_list = [str(row[0]) for row in swiped_result.all()]
+        swiped_set = set(swiped_job_ids_list)
+        await populate_swiped_set(str(current_user.id), swiped_job_ids_list)
 
     # ------------------------------------------------------------------
     # 2. Candidate retrieval
@@ -93,9 +131,12 @@ async def discover_jobs(
 
         es_job_ids = await elasticsearch_service.knn_discover(
             user_embedding=list(current_user.profile_embedding),
-            exclude_job_ids=swiped_job_ids,
             k=candidate_limit,
         )
+
+        # Post-filter: remove already-swiped jobs (O(n) on the small candidate list)
+        if swiped_set:
+            es_job_ids = [jid for jid in es_job_ids if jid not in swiped_set]
 
         if es_job_ids:
             # Fetch only the ES-returned jobs from PostgreSQL
@@ -232,6 +273,10 @@ async def discover_jobs(
             "seniority": job.seniority,
             "salary_min": job.salary_min,
             "salary_max": job.salary_max,
+            "currency": job.currency,
+            "salary_negotiable": job.salary_negotiable,
+            "work_arrangement": job.work_arrangement,
+            "job_type": job.job_type,
             "remote": job.remote,
             "is_active": job.is_active,
             "created_at": job.created_at,
@@ -241,9 +286,11 @@ async def discover_jobs(
                 "name": job.company.name,
                 "description": job.company.description,
                 "website": job.company.website,
+                "logo_url": job.company.logo_url,
                 "industry": job.company.industry,
                 "size": job.company.size,
                 "location": job.company.location,
+                "founded_year": job.company.founded_year,
                 "is_verified": job.company.is_verified,
             } if job.company else None,
             "score": score,
@@ -255,7 +302,13 @@ async def discover_jobs(
         last_job, last_score = items_to_return[-1]
         next_cursor = encode_cursor(last_score, last_job.id, last_job.created_at)
 
-    return DiscoverResponse(items=job_results, next_cursor=next_cursor)
+    response = DiscoverResponse(items=job_results, next_cursor=next_cursor)
+
+    # Cache first-page results to avoid re-running kNN + reranking on rapid refreshes
+    if cursor is None:
+        await set_cached_discover(str(current_user.id), response.model_dump_json())
+
+    return response
 
 
 @router.get("/{job_id}", response_model=JobWithCompany)
@@ -283,6 +336,7 @@ async def get_job(
 
 @router.post("/search", response_model=JobSearchResponse)
 async def search_jobs(
+    request: Request,
     search_request: JobSearchRequest,
     current_user: User = Depends(get_job_seeker),
     db: AsyncSession = Depends(get_db)
@@ -303,6 +357,19 @@ async def search_jobs(
 
     The search automatically saves to the user's recent searches.
     """
+    # Rate limit: 60 search requests per minute per user
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"search:user:{current_user.id}",
+        max_requests=60,
+        window_seconds=60,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many search requests. Please slow down.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     # Extract filter parameters from request
     filters_used = search_request.model_dump(exclude_unset=True, exclude={"skip", "limit", "sort_by", "sort_order"})
 
@@ -365,9 +432,11 @@ async def search_jobs(
                 "name": job.company.name,
                 "description": job.company.description,
                 "website": job.company.website,
+                "logo_url": job.company.logo_url,
                 "industry": job.company.industry,
                 "size": job.company.size,
                 "location": job.company.location,
+                "founded_year": job.company.founded_year,
                 "is_verified": job.company.is_verified
             } if job.company else None,
             "score": score

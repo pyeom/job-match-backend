@@ -11,7 +11,7 @@ from uuid import UUID
 
 from app.core.database import get_db
 from app.api.deps import get_current_user
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.document import Document
 from app.schemas.document import (
     DocumentUploadResponse, DocumentResponse, DocumentListResponse,
@@ -254,7 +254,15 @@ async def download_document(
     Download a document file.
 
     Returns the actual file for download.
+
+    For company users: if the document is a resume attached to an application
+    that has not yet been revealed, the download is blocked with HTTP 403.
+    This prevents companies from reading a candidate's name and contact details
+    directly from the PDF before explicitly choosing to reveal identity.
     """
+    from sqlalchemy import select as _select
+    from app.models.application import Application, RevealedApplication
+
     try:
         document = await document_repository.get(db, document_id)
 
@@ -264,16 +272,51 @@ async def download_document(
                 detail="Document not found"
             )
 
-        # Verify ownership
-        if document.user_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied. You can only download your own documents."
+        is_company_user = current_user.role in (
+            UserRole.COMPANY_RECRUITER,
+            UserRole.COMPANY_ADMIN,
+        )
+
+        if is_company_user:
+            # Company users can only download a document if it is a resume
+            # attached to an application they have already revealed.
+            app_result = await db.execute(
+                _select(Application).where(Application.resume_id == document_id)
             )
+            application = app_result.scalar_one_or_none()
+
+            if application is not None:
+                # There is an application referencing this resume — check reveal status
+                reveal_result = await db.execute(
+                    _select(RevealedApplication).where(
+                        RevealedApplication.application_id == application.id
+                    )
+                )
+                reveal = reveal_result.scalar_one_or_none()
+
+                if reveal is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Reveal candidate identity before accessing their resume.",
+                    )
+            else:
+                # Document is not linked to any application — company users
+                # cannot download arbitrary candidate documents.
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied. You can only download documents associated with revealed applications."
+                )
+        else:
+            # Job seekers (document owners) — verify ownership
+            if document.user_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Access denied. You can only download your own documents."
+                )
 
         # Get file path
         file_path = storage_service.get_document_path(
-            current_user.id,
+            document.user_id,
             document.filename
         )
 
@@ -459,3 +502,221 @@ async def list_document_versions(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to list document versions"
         )
+
+
+# ---------------------------------------------------------------------------
+# Pre-signed upload URL endpoints (S3/CDN direct upload flow)
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel as _BaseModel
+
+
+class PresignedUploadRequest(_BaseModel):
+    document_type: str
+    original_filename: str
+    content_type: str
+
+
+class PresignedUploadResponse(_BaseModel):
+    upload_url: str
+    object_key: str
+    expires_in: int
+    cdn_url: str
+
+
+class ConfirmUploadRequest(_BaseModel):
+    object_key: str
+    document_type: str
+    original_filename: str
+    file_size: int
+    content_type: str
+    label: Optional[str] = None
+    is_default: bool = False
+
+
+@router.post("/upload-url", response_model=PresignedUploadResponse)
+async def get_presigned_upload_url(
+    body: PresignedUploadRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Generate a pre-signed S3 PUT URL for direct browser-to-storage upload.
+
+    The client should:
+    1. Call this endpoint to get a pre-signed URL and an object key.
+    2. PUT the file directly to ``upload_url`` with ``Content-Type`` header set.
+    3. Call ``POST /documents/confirm-upload`` with the returned ``object_key``
+       to record the document in the database.
+
+    Returns 503 if S3 is not configured (local-storage deployments should use
+    the standard ``POST /documents`` multipart upload instead).
+    """
+    from app.core.config import settings as _settings
+
+    if not _settings.use_s3:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Direct upload is only available when S3 object storage is configured. "
+                   "Use POST /documents for multipart upload.",
+        )
+
+    allowed_types = {"resume", "cover_letter", "portfolio", "certificate", "other"}
+    if body.document_type not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid document_type. Allowed: {', '.join(allowed_types)}",
+        )
+
+    import uuid as _uuid
+    unique_id = _uuid.uuid4().hex
+    # Preserve original extension
+    ext = ""
+    if "." in body.original_filename:
+        ext = "." + body.original_filename.rsplit(".", 1)[1].lower()
+    object_key = f"documents/{current_user.id}/{unique_id}{ext}"
+
+    expires_in = 900  # 15 minutes
+
+    upload_url = storage_service.generate_presigned_upload_url(
+        object_key=object_key,
+        content_type=body.content_type,
+        expires_in=expires_in,
+    )
+    if not upload_url:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate upload URL. Check S3 configuration.",
+        )
+
+    cdn_url = storage_service.get_cdn_url_for_document_key(object_key)
+
+    return PresignedUploadResponse(
+        upload_url=upload_url,
+        object_key=object_key,
+        expires_in=expires_in,
+        cdn_url=cdn_url,
+    )
+
+
+@router.post("/confirm-upload", response_model=DocumentUploadResponse, status_code=status.HTTP_201_CREATED)
+async def confirm_direct_upload(
+    body: ConfirmUploadRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Confirm a completed direct-to-S3 upload and record it in the database.
+
+    Call this after a successful PUT to the pre-signed URL returned by
+    ``GET /documents/upload-url``.  The backend verifies the object exists in
+    S3, then creates the document database record and enqueues resume parsing
+    if applicable.
+    """
+    from app.core.config import settings as _settings
+
+    if not _settings.use_s3:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Direct upload confirmation is only available when S3 is configured.",
+        )
+
+    # Validate document type
+    allowed_types = {"resume", "cover_letter", "portfolio", "certificate", "other"}
+    if body.document_type not in allowed_types:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid document_type. Allowed: {', '.join(allowed_types)}",
+        )
+
+    # Verify the object exists in S3
+    if not storage_service.verify_s3_object_exists(body.object_key):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Object not found in storage. Ensure the file was uploaded to the pre-signed URL before confirming.",
+        )
+
+    # Ensure the object key belongs to this user
+    expected_prefix = f"documents/{current_user.id}/"
+    if not body.object_key.startswith(expected_prefix):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Object key does not belong to the current user.",
+        )
+
+    filename = storage_service.extract_filename_from_storage_path(body.object_key)
+
+    try:
+        document_data = {
+            "user_id": current_user.id,
+            "filename": filename,
+            "original_name": body.original_filename,
+            "file_type": body.content_type,
+            "file_size": body.file_size,
+            "document_type": body.document_type,
+            "is_default": body.is_default,
+            "label": body.label,
+            "storage_path": body.object_key,
+            "extracted_text": None,
+            "version": 1,
+        }
+
+        document = await document_repository.create(db, document_data)
+
+        if body.is_default:
+            await document_repository.set_default_document(
+                db, current_user.id, document.id, body.document_type
+            )
+
+        await db.commit()
+        await db.refresh(document)
+
+        # Enqueue resume parsing if applicable
+        if body.document_type == "resume":
+            try:
+                # Read the file from S3 to extract text
+                file_content = await asyncio.to_thread(
+                    lambda: __import__("boto3").client(
+                        "s3",
+                        aws_access_key_id=_settings.s3_access_key_id,
+                        aws_secret_access_key=_settings.s3_secret_access_key,
+                        region_name=_settings.s3_region,
+                        **({"endpoint_url": _settings.s3_endpoint_url} if _settings.s3_endpoint_url else {}),
+                    ).get_object(
+                        Bucket=_settings.s3_bucket_name,
+                        Key=body.object_key,
+                    )["Body"].read()
+                )
+                extracted_text = await asyncio.to_thread(
+                    document_parser.extract_text, file_content, body.content_type
+                )
+                if extracted_text:
+                    arq = await get_arq_pool()
+                    await arq.enqueue_job(
+                        "parse_resume_and_update_profile",
+                        str(current_user.id),
+                        extracted_text,
+                        str(document.id),
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to enqueue resume parsing for confirmed upload {document.id}: {e}")
+
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error creating document record for confirmed upload: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create document record: {str(e)}",
+        )
+
+    return DocumentUploadResponse(
+        id=document.id,
+        filename=document.filename,
+        original_name=document.original_name,
+        file_type=document.file_type,
+        file_size=document.file_size,
+        document_type=document.document_type,
+        is_default=document.is_default,
+        label=document.label,
+        storage_path=document.storage_path,
+        version=document.version,
+        created_at=document.created_at,
+        message="Document confirmed and recorded successfully",
+    )

@@ -2,7 +2,7 @@ import base64
 import uuid
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +15,7 @@ from app.api.deps import (
 )
 from app.models.user import User
 from app.models.job import Job
-from app.models.application import Application
+from app.models.application import Application, RevealedApplication
 from app.models.company import Company
 from app.schemas.company import PaginatedResponse, CursorPaginatedResponse
 from app.schemas.application import (
@@ -24,8 +24,14 @@ from app.schemas.application import (
     ApplicationWithUserResponse,
     UserBasicInfo,
     JobDetails,
-    CompanyDetails
+    CompanyDetails,
+    ApplicationAnonymousSchema,
+    ApplicationRevealedSchema,
+    AnonymousCandidateInfo,
+    RevealedCandidateInfo,
+    RevealRecord,
 )
+from app.utils.anonymize import candidate_alias
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
@@ -145,10 +151,107 @@ def _apply_application_cursor_filter(query, c_score: Optional[float], c_created_
         )
 
 
+# ---------------------------------------------------------------------------
+# Anonymization helpers
+# ---------------------------------------------------------------------------
+
+async def _fetch_revealed_set(
+    db: AsyncSession,
+    application_ids: list[uuid.UUID],
+) -> dict[uuid.UUID, RevealedApplication]:
+    """Return a mapping of application_id → RevealedApplication for revealed apps.
+
+    Uses a single IN query to avoid N+1 lookups when serialising a page of
+    applications.
+    """
+    if not application_ids:
+        return {}
+
+    result = await db.execute(
+        select(RevealedApplication).where(
+            RevealedApplication.application_id.in_(application_ids)
+        )
+    )
+    rows = result.scalars().all()
+    return {row.application_id: row for row in rows}
+
+
+def _build_anonymous_response(
+    app: Application,
+    user: User,
+    job: Job,
+) -> ApplicationAnonymousSchema:
+    """Construct an anonymous application response (no PII)."""
+    return ApplicationAnonymousSchema(
+        id=app.id,
+        job_id=app.job_id,
+        job_title=job.title,
+        stage=app.stage,
+        status=app.status,
+        stage_updated_at=app.stage_updated_at,
+        rejection_reason=app.rejection_reason,
+        cover_letter=app.cover_letter,
+        score=app.score,
+        created_at=app.created_at,
+        updated_at=app.updated_at,
+        is_revealed=False,
+        candidate=AnonymousCandidateInfo(
+            candidate_alias=candidate_alias(app.id),
+            skills=user.skills,
+            seniority=user.seniority,
+        ),
+    )
+
+
+def _build_revealed_response(
+    app: Application,
+    user: User,
+    job: Job,
+    reveal: RevealedApplication,
+) -> ApplicationRevealedSchema:
+    """Construct a revealed application response (full PII included)."""
+    return ApplicationRevealedSchema(
+        id=app.id,
+        job_id=app.job_id,
+        job_title=job.title,
+        stage=app.stage,
+        status=app.status,
+        stage_updated_at=app.stage_updated_at,
+        rejection_reason=app.rejection_reason,
+        cover_letter=app.cover_letter,
+        score=app.score,
+        created_at=app.created_at,
+        updated_at=app.updated_at,
+        is_revealed=True,
+        reveal_info=RevealRecord(
+            revealed_by_user_id=reveal.revealed_by_user_id,
+            revealed_at=reveal.revealed_at,
+            stage_at_reveal=reveal.stage_at_reveal,
+        ),
+        candidate=RevealedCandidateInfo(
+            id=user.id,
+            full_name=user.full_name,
+            email=user.email,
+            phone=getattr(user, "phone", None),
+            avatar_url=getattr(user, "avatar_url", None),
+            linkedin_url=getattr(user, "linkedin_url", None),
+            github_url=getattr(user, "github_url", None),
+            location=getattr(user, "location", None),
+            headline=getattr(user, "headline", None),
+            skills=user.skills,
+            seniority=user.seniority,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Router
+# ---------------------------------------------------------------------------
+
 router = APIRouter()
 
 
-@router.get("/{company_id}/jobs/{job_id}/applications", response_model=CursorPaginatedResponse[ApplicationWithUserResponse])
+@router.get("/{company_id}/jobs/{job_id}/applications")
 async def get_job_applications(
     company_id: uuid.UUID,
     job_id: uuid.UUID,
@@ -163,6 +266,10 @@ async def get_job_applications(
 
     Results are ordered ``score DESC NULLS LAST, created_at DESC, id DESC``.
     Provide ``cursor`` from the previous ``next_cursor`` to fetch the next page.
+
+    Each application is serialized anonymously by default.  Once a recruiter
+    has revealed a candidate (POST .../reveal), that application is returned
+    with full identity details.
     """
     require_company_access(current_user, company_id)
 
@@ -219,39 +326,28 @@ async def get_job_applications(
     if has_next:
         rows = rows[:limit]
 
-    applications: list[ApplicationWithUserResponse] = []
+    # Batch-fetch reveal status for all applications on this page
+    app_ids = [row[0].id for row in rows]
+    revealed_map = await _fetch_revealed_set(db, app_ids)
+
+    items: list[Union[ApplicationAnonymousSchema, ApplicationRevealedSchema]] = []
     for app, user, job_info, company in rows:
-        applications.append(
-            ApplicationWithUserResponse(
-                id=app.id,
-                job_id=app.job_id,
-                job_title=job_info.title,
-                user_id=app.user_id,
-                user_email=user.email,
-                user_full_name=user.full_name,
-                user_headline=user.headline,
-                user_skills=user.skills,
-                user_seniority=user.seniority,
-                stage=app.stage,
-                status=app.status,
-                stage_updated_at=app.stage_updated_at,
-                rejection_reason=app.rejection_reason,
-                created_at=app.created_at,
-                updated_at=app.updated_at or app.created_at,
-                score=app.score,
-            )
-        )
+        reveal = revealed_map.get(app.id)
+        if reveal:
+            items.append(_build_revealed_response(app, user, job_info, reveal))
+        else:
+            items.append(_build_anonymous_response(app, user, job_info))
 
     next_cursor: Optional[str] = None
-    if has_next and applications:
-        last = applications[-1]
+    if has_next and items:
+        last = items[-1]
         next_cursor = _encode_application_cursor(last.score, last.created_at, last.id)
 
-    return CursorPaginatedResponse(
-        items=applications,
-        next_cursor=next_cursor,
-        has_next=has_next,
-    )
+    return {
+        "items": [item.model_dump() for item in items],
+        "next_cursor": next_cursor,
+        "has_next": has_next,
+    }
 
 
 @router.patch("/applications/{application_id}", response_model=ApplicationWithUserResponse)
@@ -428,7 +524,7 @@ async def update_application_status(
     )
 
 
-@router.get("/applications", response_model=CursorPaginatedResponse[ApplicationWithUserResponse])
+@router.get("/applications")
 async def get_all_company_applications(
     limit: int = Query(50, ge=1, le=100),
     cursor: Optional[str] = Query(None, description="Opaque cursor from the previous page"),
@@ -445,6 +541,9 @@ async def get_all_company_applications(
 
     Results are ordered ``score DESC NULLS LAST, created_at DESC, id DESC``.
     Provide ``cursor`` from the previous ``next_cursor`` to fetch the next page.
+
+    Each application is returned anonymously by default.  Applications where
+    the identity has been revealed include full PII in the ``candidate`` field.
     """
     company_id = current_user.company_id
 
@@ -505,36 +604,105 @@ async def get_all_company_applications(
     if has_next:
         rows = rows[:limit]
 
-    applications: list[ApplicationWithUserResponse] = []
+    # Batch-fetch reveal status for all applications on this page
+    app_ids = [row[0].id for row in rows]
+    revealed_map = await _fetch_revealed_set(db, app_ids)
+
+    items: list[Union[ApplicationAnonymousSchema, ApplicationRevealedSchema]] = []
     for app, user, job in rows:
-        applications.append(
-            ApplicationWithUserResponse(
-                id=app.id,
-                job_id=app.job_id,
-                job_title=job.title,
-                user_id=app.user_id,
-                user_email=user.email,
-                user_full_name=user.full_name,
-                user_headline=user.headline,
-                user_skills=user.skills,
-                user_seniority=user.seniority,
-                stage=app.stage,
-                status=app.status,
-                stage_updated_at=app.stage_updated_at,
-                rejection_reason=app.rejection_reason,
-                created_at=app.created_at,
-                updated_at=app.updated_at or app.created_at,
-                score=app.score,
-            )
-        )
+        reveal = revealed_map.get(app.id)
+        if reveal:
+            items.append(_build_revealed_response(app, user, job, reveal))
+        else:
+            items.append(_build_anonymous_response(app, user, job))
 
     next_cursor: Optional[str] = None
-    if has_next and applications:
-        last = applications[-1]
+    if has_next and items:
+        last = items[-1]
         next_cursor = _encode_application_cursor(last.score, last.created_at, last.id)
 
-    return CursorPaginatedResponse(
-        items=applications,
-        next_cursor=next_cursor,
-        has_next=has_next,
+    return {
+        "items": [item.model_dump() for item in items],
+        "next_cursor": next_cursor,
+        "has_next": has_next,
+    }
+
+
+@router.post(
+    "/{company_id}/applications/{application_id}/reveal",
+)
+async def reveal_candidate_identity(
+    company_id: uuid.UUID,
+    application_id: uuid.UUID,
+    current_user: User = Depends(get_company_user_with_verification),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Reveal the identity of a candidate for a specific application.
+
+    This action is:
+    - **Permanent** — once revealed, the identity cannot be hidden again.
+    - **Idempotent** — calling this endpoint a second time returns 200 with
+      the existing reveal record (not a 409).
+    - **Logged** — a structured audit event is emitted with company, application,
+      recruiter, and stage-at-reveal data.
+
+    Authorization: caller must be a recruiter or admin of ``company_id``.
+    """
+    require_company_access(current_user, company_id)
+
+    # Fetch the application, its owning job (to verify company), and user
+    result = await db.execute(
+        select(Application, User, Job)
+        .select_from(Application)
+        .join(Job, Application.job_id == Job.id)
+        .join(User, Application.user_id == User.id)
+        .where(Application.id == application_id)
     )
+    row = result.first()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    application, user, job = row
+
+    # Verify the job belongs to the requester's company
+    if job.company_id != company_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied. Application does not belong to your company."
+        )
+
+    # Check whether identity has already been revealed (idempotency)
+    existing_reveal_result = await db.execute(
+        select(RevealedApplication).where(
+            RevealedApplication.application_id == application_id
+        )
+    )
+    reveal = existing_reveal_result.scalar_one_or_none()
+
+    if reveal is None:
+        # First reveal — create the audit record
+        reveal = RevealedApplication(
+            application_id=application_id,
+            revealed_by_user_id=current_user.id,
+            stage_at_reveal=application.stage,
+        )
+        db.add(reveal)
+        await db.commit()
+        await db.refresh(reveal)
+
+        logger.info(
+            "reveal_candidate event: company_id=%s application_id=%s "
+            "recruiter_id=%s stage_at_reveal=%s",
+            company_id,
+            application_id,
+            current_user.id,
+            application.stage,
+        )
+    else:
+        # Already revealed — idempotent return, no new record created
+        logger.debug(
+            "reveal_candidate already exists: application_id=%s", application_id
+        )
+
+    return _build_revealed_response(application, user, job, reveal).model_dump()

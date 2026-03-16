@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from typing import Optional
 from app.core.database import get_db
-from app.api.deps import get_job_seeker
+from app.api.deps import get_job_seeker, require_email_verified
+from app.services.rate_limit_service import rate_limit_service
 from app.models.user import User
 from app.models.job import Job
 from app.models.swipe import Swipe
@@ -14,16 +15,23 @@ from app.schemas.swipe import (
     Swipe as SwipeSchema,
     SwipeWithUndoWindow,
     UndoResponse,
+    UndoableSwipeItem,
+    UndoableSwipesResponse,
     RejectedJobsResponse,
     RejectedJobItem
 )
 from app.schemas.job import JobWithCompany
 from app.services.swipe_service import SwipeService
 from app.core.arq import get_arq_pool
+from app.core.cache import (
+    invalidate_discover_cache,
+    add_to_swiped_set,
+    remove_from_swiped_set,
+)
 from app.services.scoring_service import ScoringService
 import base64
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import logging
 
 logger = logging.getLogger(__name__)
@@ -33,11 +41,25 @@ router = APIRouter()
 
 @router.post("", response_model=SwipeSchema)
 async def create_swipe(
+    request: Request,
     swipe_data: SwipeCreate,
-    current_user: User = Depends(get_job_seeker),  # Only job seekers can swipe
+    current_user: User = Depends(get_job_seeker),  # Job seekers only
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new swipe (and application if RIGHT)"""
+
+    # Rate limit: 120 swipes per minute per user (allows fast swiping)
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"swipe:user:{current_user.id}",
+        max_requests=120,
+        window_seconds=60,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many swipes. Please slow down.",
+            headers={"Retry-After": str(retry_after)},
+        )
 
     # Validate job exists
     result = await db.execute(select(Job).where(Job.id == swipe_data.job_id, Job.is_active == True))
@@ -49,19 +71,21 @@ async def create_swipe(
     if swipe_data.direction not in ["LEFT", "RIGHT"]:
         raise HTTPException(status_code=400, detail="Direction must be LEFT or RIGHT")
 
-    # Check if swipe already exists and is not undone (update if so)
+    # Check if any swipe exists for this (user, job) — active or previously undone
     result = await db.execute(select(Swipe).where(
         Swipe.user_id == current_user.id,
         Swipe.job_id == swipe_data.job_id,
-        Swipe.is_undone == False
     ))
     existing_swipe = result.scalar_one_or_none()
 
     application = None
 
     if existing_swipe:
-        # Update existing swipe direction
+        # Reuse the existing swipe record (reset if previously undone, update direction)
         existing_swipe.direction = swipe_data.direction
+        existing_swipe.is_undone = False
+        existing_swipe.undone_at = None
+        existing_swipe.created_at = datetime.now(timezone.utc)  # fresh undo window
         await db.flush()
         swipe = existing_swipe
     else:
@@ -100,7 +124,7 @@ async def create_swipe(
             application = Application(
                 user_id=current_user.id,
                 job_id=swipe_data.job_id,
-                status="ACTIVE",
+                status="PENDING",
                 score=score
             )
             db.add(application)
@@ -110,26 +134,24 @@ async def create_swipe(
     await db.commit()
     await db.refresh(swipe)
 
+    # Invalidate discover feed cache so the next load excludes this swiped job
+    await invalidate_discover_cache(str(current_user.id))
+    # Keep Redis swiped set in sync (no-op if set not yet cached)
+    await add_to_swiped_set(str(current_user.id), str(swipe_data.job_id))
+
     if application is not None:
-        logger.info(f"Created new application {application.id} for user {current_user.id} on job {swipe_data.job_id}")
+        logger.info(f"Created PENDING application {application.id} for user {current_user.id} on job {swipe_data.job_id}")
 
-        # Notify the company about the new application (best-effort, after commit)
+        # Enqueue background task to finalize after 120s undo window
         try:
-            from app.services.notification_service import NotificationService
-
-            logger.info(f"Attempting to create notification for application {application.id}")
-            notification_service = NotificationService()
-            notification = await notification_service.create_new_application_notification(db, application.id)
-
-            if notification:
-                await db.commit()
-                logger.info(f"Successfully created notification {notification.id} for application {application.id}")
-            else:
-                logger.warning(f"Notification service returned None for application {application.id}")
-
+            arq = await get_arq_pool()
+            await arq.enqueue_job(
+                "finalize_pending_application",
+                str(application.id),
+                _defer_by=timedelta(seconds=120)
+            )
         except Exception as e:
-            logger.error(f"Failed to create notification for application {application.id}: {e}", exc_info=True)
-            await db.rollback()
+            logger.warning(f"Failed to enqueue finalize task for application {application.id}: {e}")
 
     # Enqueue user embedding update (threshold check done inside the task)
     if swipe_data.direction == "RIGHT":
@@ -324,6 +346,30 @@ async def get_rejected_jobs(
     )
 
 
+@router.get("/undoable", response_model=UndoableSwipesResponse)
+async def get_undoable_swipes(
+    current_user: User = Depends(get_job_seeker),
+    db: AsyncSession = Depends(get_db)
+):
+    """Get all swipe IDs still within the 2-minute undo window, sorted newest first.
+
+    The frontend can use this to know exactly how many undos are available.
+    Swipes older than 120 seconds are no longer undoable and will not appear here.
+    """
+    swipe_service = SwipeService()
+    swipes = await swipe_service.get_undoable_swipes(db, current_user)
+    items = [
+        UndoableSwipeItem(
+            id=s.id,
+            job_id=s.job_id,
+            direction=s.direction,
+            created_at=s.created_at
+        )
+        for s in swipes
+    ]
+    return UndoableSwipesResponse(swipes=items, count=len(items))
+
+
 @router.get("/last", response_model=Optional[SwipeWithUndoWindow])
 async def get_last_swipe(
     current_user: User = Depends(get_job_seeker),
@@ -331,9 +377,8 @@ async def get_last_swipe(
 ):
     """Get the user's last swipe within the undo window
 
-    This endpoint returns the most recent swipe if it's within the 5-second
-    undo window, along with information about whether it can be undone and
-    how much time remains.
+    This endpoint returns the most recent swipe if it's within the 2-minute
+    undo window, along with information about whether it can be undone.
 
     Features:
     - Returns None if no recent swipe within undo window
@@ -378,12 +423,12 @@ async def undo_swipe(
 ):
     """Undo a swipe (soft delete)
 
-    This endpoint allows users to undo their last swipe within a 5-second window.
+    This endpoint allows users to undo any swipe made within the last 2 minutes.
     The operation marks the swipe as undone and removes any associated application
     if it was a RIGHT swipe.
 
     Constraints:
-    - Swipe must be within 5-second undo window
+    - Swipe must be within 2-minute undo window
     - Swipe must belong to the current user
     - Swipe must not be already undone
 
@@ -412,6 +457,11 @@ async def undo_swipe(
     # Commit transaction
     await db.commit()
     await db.refresh(swipe)
+
+    # Invalidate discover feed cache so the undone job can reappear
+    await invalidate_discover_cache(str(current_user.id))
+    # Keep Redis swiped set in sync so the undone job re-enters future discover results
+    await remove_from_swiped_set(str(current_user.id), str(swipe.job_id))
 
     return UndoResponse(
         message="Swipe undone successfully",

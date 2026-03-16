@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, validator, field_validator
-from typing import Optional, Union
+from typing import Optional, Union, List
 import uuid
 from app.models.user import UserRole
 
@@ -8,6 +8,7 @@ class Token(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+    expires_in: int
 
 
 class TokenData(BaseModel):
@@ -17,6 +18,8 @@ class TokenData(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+    device_name: Optional[str] = None
+    platform: Optional[str] = None
 
 
 class UserCreate(BaseModel):
@@ -24,6 +27,8 @@ class UserCreate(BaseModel):
     password: str
     full_name: str
     role: UserRole = UserRole.JOB_SEEKER
+    device_name: Optional[str] = None
+    platform: Optional[str] = None
 
     @field_validator('full_name')
     @classmethod
@@ -52,6 +57,8 @@ class CompanyUserCreate(BaseModel):
     company_industry: Optional[str] = None
     company_size: Optional[str] = None
     company_location: Optional[str] = None
+    device_name: Optional[str] = None
+    platform: Optional[str] = None
 
     @field_validator('full_name')
     @classmethod
@@ -106,3 +113,29 @@ class TokenRefreshResponse(BaseModel):
 class LogoutResponse(BaseModel):
     message: str
     detail: Optional[str] = None
+
+
+class RefreshTokenLogout(BaseModel):
+    refresh_token: Optional[str] = None
+
+
+class DeviceSession(BaseModel):
+    device_id: str
+    device_name: str
+    platform: str
+    created_at: int
+    expires_at: int
+
+
+class DeviceListResponse(BaseModel):
+    devices: List[DeviceSession]
+    count: int
+
+
+class LogoutAllResponse(BaseModel):
+    message: str
+    devices_revoked: int
+
+
+class RevokeDeviceResponse(BaseModel):
+    message: str

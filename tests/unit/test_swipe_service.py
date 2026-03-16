@@ -101,7 +101,8 @@ class TestCheckUndoEligibility:
     @pytest.mark.asyncio
     async def test_outside_undo_window_denied(self):
         user = _make_user()
-        swipe = _make_swipe(user_id=user.id, seconds_old=10)  # 10s > 5s window
+        # 130s exceeds the 120s (UNDO_WINDOW_SECONDS) rolling window
+        swipe = _make_swipe(user_id=user.id, seconds_old=130)
         service, _ = _make_service()
         db = AsyncMock()
 
@@ -152,11 +153,11 @@ class TestUndoSwipe:
 
         service, repo = _make_service(mock_swipe=swipe, mark_as_undone_return=undone_swipe)
         db = AsyncMock()
-        db.execute = AsyncMock()
 
-        await service.undo_swipe(db, user, swipe.id)
-        # db.execute should be called to delete the application
-        db.execute.assert_called()
+        result = await service.undo_swipe(db, user, swipe.id)
+        # Service delegates to repo.mark_as_undone which handles application deletion
+        repo.mark_as_undone.assert_called_once_with(db, swipe)
+        assert result.is_undone is True
 
     @pytest.mark.asyncio
     async def test_swipe_not_found_raises_404(self):
@@ -171,7 +172,8 @@ class TestUndoSwipe:
     @pytest.mark.asyncio
     async def test_undo_outside_window_raises_400(self):
         user = _make_user()
-        swipe = _make_swipe(user_id=user.id, direction="LEFT", seconds_old=60)
+        # 130s exceeds the 120s (UNDO_WINDOW_SECONDS) rolling window
+        swipe = _make_swipe(user_id=user.id, direction="LEFT", seconds_old=130)
         service, _ = _make_service(mock_swipe=swipe)
         db = AsyncMock()
 

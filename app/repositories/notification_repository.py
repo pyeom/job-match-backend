@@ -77,7 +77,8 @@ class NotificationRepository(BaseRepository[Notification]):
                 .where(Notification.user_id == user_id)
                 .options(
                     joinedload(Notification.job).joinedload(Job.company),
-                    joinedload(Notification.application)
+                    joinedload(Notification.application),
+                    joinedload(Notification.user)
                 )
                 .order_by(desc(Notification.created_at))
             )

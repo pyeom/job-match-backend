@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, Text, Boolean, ForeignKey
+from sqlalchemy import Column, Index, Integer, String, DateTime, JSON, Text, Boolean, ForeignKey, text
 from sqlalchemy.sql import func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
@@ -41,5 +41,10 @@ class Job(Base):
     # Relationships
     company = relationship("Company", back_populates="jobs")
     
+    __table_args__ = (
+        # PG fallback query: active jobs ordered by recency (from migration q3r4s5t6u7v8)
+        Index('ix_jobs_active_created_at', 'is_active', text('created_at DESC')),
+    )
+
     def __repr__(self):
         return f"<Job(id={self.id}, title={self.title}, company_id={self.company_id})>"

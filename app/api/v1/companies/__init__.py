@@ -19,9 +19,12 @@ from .company_push_tokens import router as push_tokens_router
 # Create a single router that combines all company endpoints
 router = APIRouter()
 
-# Include all sub-routers
+# Include all sub-routers.
+# IMPORTANT: applications_router must come before crud_router so that
+# static paths like GET /applications are matched before the wildcard
+# GET /{company_id} route in crud_router.
+router.include_router(applications_router)
 router.include_router(crud_router)
 router.include_router(jobs_router)
-router.include_router(applications_router)
 router.include_router(notifications_router)
 router.include_router(push_tokens_router)

@@ -35,7 +35,7 @@ async def get_user_applications(
             selectinload(Application.job).selectinload(Job.company),
             selectinload(Application.user),
         )
-        .where(Application.user_id == user_id)
+        .where(Application.user_id == user_id, Application.status != "PENDING")
         .order_by(Application.created_at.desc())
     )
     applications = result.scalars().all()
@@ -66,7 +66,8 @@ async def get_user_application(
         )
         .where(
             Application.id == application_id,
-            Application.user_id == user_id
+            Application.user_id == user_id,
+            Application.status != "PENDING"
         )
     )
     application = result.scalar_one_or_none()
@@ -129,7 +130,7 @@ async def get_current_user_applications_legacy(
             selectinload(Application.job).selectinload(Job.company),
             selectinload(Application.user),
         )
-        .where(Application.user_id == current_user.id)
+        .where(Application.user_id == current_user.id, Application.status != "PENDING")
         .order_by(Application.created_at.desc())
     )
     applications = result.scalars().all()
@@ -155,7 +156,8 @@ async def get_application_legacy(
         )
         .where(
             Application.id == application_id,
-            Application.user_id == current_user.id
+            Application.user_id == current_user.id,
+            Application.status != "PENDING"
         )
     )
     application = result.scalar_one_or_none()

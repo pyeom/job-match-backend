@@ -1,8 +1,9 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List
 from datetime import datetime
 import uuid
 from app.schemas.company import CompanyPublic
+from app.utils.sanitize import sanitize_plain_text, sanitize_rich_text
 
 
 class JobBase(BaseModel):
@@ -19,6 +20,26 @@ class JobBase(BaseModel):
     remote: Optional[bool] = False
     work_arrangement: Optional[str] = None
     job_type: Optional[str] = None
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def sanitize_title(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("location", mode="before")
+    @classmethod
+    def sanitize_location(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("short_description", mode="before")
+    @classmethod
+    def sanitize_short_description(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def sanitize_description(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_rich_text(v)
 
 
 class JobCreate(JobBase):
@@ -40,6 +61,26 @@ class JobUpdate(BaseModel):
     work_arrangement: Optional[str] = None
     job_type: Optional[str] = None
     is_active: Optional[bool] = None
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def sanitize_title(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("location", mode="before")
+    @classmethod
+    def sanitize_location(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("short_description", mode="before")
+    @classmethod
+    def sanitize_short_description(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_plain_text(v)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def sanitize_description(cls, v: Optional[str]) -> Optional[str]:
+        return sanitize_rich_text(v)
 
 
 class JobInDB(JobBase):

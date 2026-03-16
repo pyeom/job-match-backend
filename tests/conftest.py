@@ -76,9 +76,14 @@ def _patch_postgres_types_for_sqlite(metadata) -> None:
 # Session-scoped test engine (SQLite in-memory, shared via StaticPool so all
 # connections see the same data within a test process).
 # ---------------------------------------------------------------------------
-@pytest_asyncio.fixture(scope="session")
+@pytest_asyncio.fixture
 async def engine():
-    """Create the SQLite test engine and all tables once per test session."""
+    """Create the SQLite test engine and all tables once per test function.
+
+    Using function scope (not session) keeps each test's async fixtures on the
+    same event loop, which is required by pytest-asyncio 1.x.  SQLite in-memory
+    with StaticPool is fast enough that per-test engine creation is negligible.
+    """
     # Import Base here (after env vars are set) to ensure models register.
     from app.core.database import Base
 
@@ -87,7 +92,7 @@ async def engine():
     import app.models.company       # noqa: F401
     import app.models.job           # noqa: F401
     import app.models.swipe         # noqa: F401
-    import app.models.application   # noqa: F401
+    import app.models.application   # noqa: F401  (also registers RevealedApplication)
     import app.models.notification  # noqa: F401
     import app.models.push_token    # noqa: F401
     import app.models.document      # noqa: F401
@@ -95,7 +100,7 @@ async def engine():
     import app.models.recent_search # noqa: F401
     import app.models.interaction   # noqa: F401
 
-    # Swap JSONB → JSON so SQLite can render the DDL
+    # Swap JSONB → JSON so SQLite can render the DDL (idempotent)
     _patch_postgres_types_for_sqlite(Base.metadata)
 
     test_engine = create_async_engine(
@@ -167,15 +172,20 @@ async def db_session(engine) -> AsyncGenerator[AsyncSession, None]:
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
 def mock_redis(monkeypatch):
-    """Replace the Redis pool/client with an in-process fakeredis instance."""
+    """Replace the Redis pool/client with an in-process fakeredis instance.
+
+    A fresh FakeRedis client is created on every call to _get_redis() so it is
+    always bound to the test's current event loop.  All clients share the same
+    FakeServer (in-memory store) so data is visible within a test but the async
+    Queue inside each client belongs to the right loop.
+    """
     try:
         import fakeredis.aioredis as fakeredis_async
 
         fake_server = fakeredis_async.FakeServer()
-        fake_redis = fakeredis_async.FakeRedis(server=fake_server, decode_responses=True)
 
         async def _get_redis():
-            return fake_redis
+            return fakeredis_async.FakeRedis(server=fake_server, decode_responses=True)
 
         monkeypatch.setattr("app.core.cache.get_redis", _get_redis)
         # Patch the reference used directly inside security.py functions

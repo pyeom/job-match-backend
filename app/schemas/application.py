@@ -161,3 +161,100 @@ class ApplicationExport(BaseModel):
     last_updated: Optional[datetime]
     cover_letter: Optional[str]
     notes: Optional[str]
+
+
+# ---------------------------------------------------------------------------
+# Blind-review schemas — TASK-041
+# ---------------------------------------------------------------------------
+
+class AnonymousCandidateInfo(BaseModel):
+    """Candidate info shown to a company before identity reveal.
+
+    All PII fields are absent.  Only professional-merit attributes are included
+    so recruiters can evaluate the candidate solely on their skills and
+    experience.
+    """
+    candidate_alias: str
+    skills: Optional[List[str]] = None
+    seniority: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class RevealedCandidateInfo(BaseModel):
+    """Full candidate info available after a company explicitly reveals identity."""
+    id: uuid.UUID
+    full_name: Optional[str] = None
+    email: str
+    phone: Optional[str] = None
+    avatar_url: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    github_url: Optional[str] = None
+    location: Optional[str] = None
+    headline: Optional[str] = None
+    skills: Optional[List[str]] = None
+    seniority: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ApplicationAnonymousSchema(BaseModel):
+    """Company-facing application response with candidate identity redacted.
+
+    Returned by the list/detail endpoints when the application has NOT yet
+    been revealed.  The ``candidate`` field contains only professional
+    attributes plus a stable alias.
+    """
+    id: uuid.UUID
+    job_id: uuid.UUID
+    job_title: str
+    stage: ApplicationStage
+    status: ApplicationStatus
+    stage_updated_at: datetime
+    rejection_reason: Optional[str] = None
+    cover_letter: Optional[str] = None
+    score: Optional[int] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    is_revealed: bool = False
+    candidate: AnonymousCandidateInfo
+
+    class Config:
+        from_attributes = True
+
+
+class RevealRecord(BaseModel):
+    """Minimal information about when/who performed the reveal."""
+    revealed_by_user_id: uuid.UUID
+    revealed_at: datetime
+    stage_at_reveal: str
+
+    class Config:
+        from_attributes = True
+
+
+class ApplicationRevealedSchema(BaseModel):
+    """Company-facing application response with full candidate identity.
+
+    Returned by the list/detail endpoints when the application HAS been
+    revealed, and directly by the POST .../reveal endpoint.
+    """
+    id: uuid.UUID
+    job_id: uuid.UUID
+    job_title: str
+    stage: ApplicationStage
+    status: ApplicationStatus
+    stage_updated_at: datetime
+    rejection_reason: Optional[str] = None
+    cover_letter: Optional[str] = None
+    score: Optional[int] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    is_revealed: bool = True
+    reveal_info: Optional[RevealRecord] = None
+    candidate: RevealedCandidateInfo
+
+    class Config:
+        from_attributes = True

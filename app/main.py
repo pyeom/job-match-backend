@@ -8,9 +8,10 @@ from app.core.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from app.core.csrf import CSRFMiddleware, generate_csrf_token, CSRF_COOKIE_NAME, CSRF_TOKEN_MAX_AGE
 from sqlalchemy import text
 from app.core.config import settings
 
@@ -119,6 +120,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# CSRF protection for web clients.
+# Bearer-token requests (mobile/API clients) are automatically exempt inside the middleware.
+# CSRFMiddleware is added first so it becomes the innermost wrapper; CORSMiddleware (added
+# second) becomes the outermost wrapper and handles preflight OPTIONS before CSRF runs.
+app.add_middleware(
+    CSRFMiddleware,
+    secret=settings.jwt_secret,
+    is_production=_is_prod,
+)
+
 # Add CORS middleware with explicit method and header allowlist.
 # allow_origin_regex covers ngrok tunnels used during local development —
 # their subdomains rotate so they cannot be hardcoded in allowed_origins.
@@ -133,6 +144,7 @@ app.add_middleware(
         "Authorization",
         "Accept",
         "X-Request-ID",
+        "X-CSRF-Token",
         "ngrok-skip-browser-warning",  # injected by api.ts when backend URL is a ngrok tunnel
     ],
     expose_headers=["X-Request-ID"],
@@ -159,8 +171,9 @@ async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Content-Security-Policy"] = "default-src 'none'"
+    response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=()"
     if settings.app_env == "production":
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
@@ -176,6 +189,51 @@ async def request_id_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     return response
+
+
+@app.middleware("http")
+async def general_rate_limit_middleware(request: Request, call_next):
+    """Apply a broad 300 req/min limit per authenticated user across all API endpoints.
+
+    This is a backstop guard — individual endpoints apply tighter limits on their own.
+    Health checks, docs, and WebSocket upgrades are excluded.
+    """
+    path = request.url.path
+
+    # Skip non-API paths and WebSocket upgrades
+    if not path.startswith("/api/") or request.headers.get("upgrade", "").lower() == "websocket":
+        return await call_next(request)
+
+    # Derive the rate-limit key from the bearer token subject (user id) when
+    # present, falling back to the client IP so unauthenticated paths are also
+    # covered without importing the full auth dependency chain here.
+    rate_key: str
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        try:
+            from app.core.security import verify_token
+            user_id = await verify_token(token, "access")
+            rate_key = f"general:user:{user_id}" if user_id else f"general:ip:{request.client.host if request.client else 'unknown'}"
+        except Exception:
+            rate_key = f"general:ip:{request.client.host if request.client else 'unknown'}"
+    else:
+        rate_key = f"general:ip:{request.client.host if request.client else 'unknown'}"
+
+    from app.services.rate_limit_service import rate_limit_service
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=rate_key,
+        max_requests=300,
+        window_seconds=60,
+    )
+    if not is_allowed:
+        return JSONResponse(
+            {"detail": "Rate limit exceeded. Too many requests."},
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    return await call_next(request)
 
 
 # Include API routers
@@ -201,6 +259,29 @@ app.include_router(media.router, prefix="/api/v1/media", tags=["Media"])
 app.include_router(ai.router, prefix="/api/v1/ai", tags=["AI Features"])
 
 
+@app.get("/api/v1/csrf-token", tags=["Security"])
+async def csrf_token_endpoint(response: Response):
+    """Issue a CSRF token as a signed non-HttpOnly cookie.
+
+    Web clients must call this endpoint once per session (or whenever the cookie
+    expires) and then include the token value in the X-CSRF-Token header on all
+    state-changing requests.
+
+    Mobile and API clients that authenticate via Authorization: Bearer are exempt
+    from CSRF checks entirely and do not need to call this endpoint.
+    """
+    token = generate_csrf_token(settings.jwt_secret)
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=token,
+        max_age=CSRF_TOKEN_MAX_AGE,
+        httponly=False,   # JS must be able to read it
+        secure=_is_prod,  # HTTPS only in production
+        samesite="strict",
+    )
+    return {"csrf_token": token}
+
+
 @app.get("/healthz")
 async def health_check():
     """Health check endpoint (liveness — always returns 200 if the process is alive)"""
@@ -223,14 +304,16 @@ async def readiness():
             await conn.execute(text("SELECT 1"))
         checks["database"] = "ok"
     except Exception as e:
-        checks["database"] = f"error: {e}"
+        logger.error("DB health check failed: %s", e)
+        checks["database"] = "error"
 
     try:
         r = await get_redis()
         await r.ping()
         checks["redis"] = "ok"
     except Exception as e:
-        checks["redis"] = f"error: {e}"
+        logger.error("Redis health check failed: %s", e)
+        checks["redis"] = "error"
 
     checks["embedding_model"] = "ok" if embedding_service.is_loaded else "not_loaded"
 
@@ -239,7 +322,8 @@ async def readiness():
         info = await elasticsearch_service.client.cluster.health()
         checks["elasticsearch"] = "ok" if info["status"] in ("green", "yellow") else f"status:{info['status']}"
     except Exception as e:
-        checks["elasticsearch"] = f"error: {e}"
+        logger.error("Elasticsearch health check failed: %s", e)
+        checks["elasticsearch"] = "error"
 
     all_ok = all(v == "ok" for v in checks.values())
     status_code = 200 if all_ok else 503

@@ -2,6 +2,7 @@
 Image processing service for avatar uploads.
 Handles image resizing, format conversion, and validation.
 """
+import magic
 from PIL import Image
 from io import BytesIO
 from typing import Tuple, Optional
@@ -62,6 +63,18 @@ class ImageService:
             raise HTTPException(
                 status_code=400,
                 detail=f"File too large. Maximum size: {self.MAX_FILE_SIZE / (1024 * 1024)}MB"
+            )
+
+        # Detect MIME type from actual file bytes — do not trust client Content-Type
+        try:
+            detected_mime = magic.Magic(mime=True).from_buffer(content)
+        except Exception:
+            detected_mime = file.content_type  # fallback if libmagic unavailable
+
+        if detected_mime not in self.ALLOWED_MIME_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid file content. Detected: {detected_mime}. Allowed: JPEG, PNG, WebP"
             )
 
         # Seek back to beginning for later processing

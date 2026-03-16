@@ -15,7 +15,6 @@ import logging
 
 from app.models.swipe import Swipe
 from app.models.user import User
-from app.models.application import Application
 from app.repositories.swipe_repository import SwipeRepository
 
 logger = logging.getLogger(__name__)
@@ -31,8 +30,8 @@ class SwipeService:
     - Application cleanup when swipes are undone
     """
 
-    # Constants
-    UNDO_WINDOW_SECONDS = 5
+    # Constants — session-level rolling window of 2 minutes
+    UNDO_WINDOW_SECONDS = 120
 
     def __init__(
         self,
@@ -82,10 +81,10 @@ class SwipeService:
             if swipe.is_undone:
                 return False, "This swipe has already been undone"
 
-            # Check undo window
+            # Check undo window (2-minute session-level rolling window)
             time_elapsed = (datetime.now(timezone.utc) - swipe.created_at).total_seconds()
             if time_elapsed > self.UNDO_WINDOW_SECONDS:
-                return False, f"Undo window ({self.UNDO_WINDOW_SECONDS} seconds) has expired"
+                return False, "Undo window has expired (2 minutes)"
 
             return True, None
 
@@ -142,18 +141,6 @@ class SwipeService:
             # Mark as undone
             swipe = await self.swipe_repo.mark_as_undone(db, swipe)
 
-            # If RIGHT swipe, delete associated application
-            if swipe.direction == "RIGHT":
-                from sqlalchemy import delete as sql_delete
-
-                delete_stmt = sql_delete(Application).where(
-                    Application.user_id == user.id,
-                    Application.job_id == swipe.job_id
-                )
-                await db.execute(delete_stmt)
-
-                logger.info(f"Deleted application for user {user.id} on job {swipe.job_id} due to undo")
-
             logger.info(
                 f"User {user.id} undid swipe {swipe_id} (direction: {swipe.direction})"
             )
@@ -168,6 +155,25 @@ class SwipeService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to undo swipe"
             )
+
+    async def get_undoable_swipes(
+        self,
+        db: AsyncSession,
+        user: User
+    ) -> list[Swipe]:
+        """
+        Get all swipes the user can still undo (within the 2-minute session window),
+        sorted newest first.
+        """
+        try:
+            return await self.swipe_repo.get_undoable_swipes(
+                db,
+                user.id,
+                undo_window_seconds=self.UNDO_WINDOW_SECONDS
+            )
+        except Exception as e:
+            logger.error(f"Error getting undoable swipes for user {user.id}: {e}")
+            return []
 
     async def get_last_swipe_with_window(
         self,
