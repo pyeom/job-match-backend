@@ -199,6 +199,8 @@ def _build_anonymous_response(
             candidate_alias=candidate_alias(app.id),
             skills=user.skills,
             seniority=user.seniority,
+            experience=user.experience,
+            education=user.education,
         ),
     )
 
@@ -240,6 +242,8 @@ def _build_revealed_response(
             headline=getattr(user, "headline", None),
             skills=user.skills,
             seniority=user.seniority,
+            experience=user.experience,
+            education=user.education,
         ),
     )
 
@@ -706,3 +710,54 @@ async def reveal_candidate_identity(
         )
 
     return _build_revealed_response(application, user, job, reveal).model_dump()
+
+
+# ---------------------------------------------------------------------------
+# GET /{company_id}/applications/{application_id}/explanation
+# Returns the cached match explanation for an application without exposing PII
+# ---------------------------------------------------------------------------
+
+@router.get("/{company_id}/applications/{application_id}/explanation")
+async def get_application_explanation(
+    company_id: uuid.UUID,
+    application_id: uuid.UUID,
+    current_user: User = Depends(get_company_user_with_verification),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return the cached match-score explanation for an application.
+
+    Uses the application_id so the caller never needs the candidate's user_id.
+    Returns an empty string when no explanation has been generated yet.
+    """
+    require_company_access(current_user, company_id)
+
+    # Fetch application + job to verify ownership
+    result = await db.execute(
+        select(Application, Job)
+        .select_from(Application)
+        .join(Job, Application.job_id == Job.id)
+        .where(Application.id == application_id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Application not found")
+
+    application, job = row
+    if job.company_id != company_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Look up the match score for this candidate + job
+    from app.models.mala import MatchScore
+    score_result = await db.execute(
+        select(MatchScore).where(
+            MatchScore.user_id == application.user_id,
+            MatchScore.job_id == application.job_id,
+        )
+    )
+    match_score = score_result.scalar_one_or_none()
+
+    explanation_text = ""
+    if match_score and match_score.explanation_text:
+        explanation_text = match_score.explanation_text
+
+    return {"explanation_text": explanation_text}

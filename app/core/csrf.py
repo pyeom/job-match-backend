@@ -35,6 +35,8 @@ _EXEMPT_PATHS = {
     "/api/v1/auth/register-company",
     "/api/v1/auth/login",
     "/api/v1/auth/refresh",
+    "/api/v1/auth/workos/callback",
+    "/api/v1/auth/workos/verify-email",
 }
 
 

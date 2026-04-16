@@ -177,6 +177,8 @@ class AnonymousCandidateInfo(BaseModel):
     candidate_alias: str
     skills: Optional[List[str]] = None
     seniority: Optional[str] = None
+    experience: Optional[List[dict]] = None
+    education: Optional[List[dict]] = None
 
     class Config:
         from_attributes = True
@@ -195,6 +197,8 @@ class RevealedCandidateInfo(BaseModel):
     headline: Optional[str] = None
     skills: Optional[List[str]] = None
     seniority: Optional[str] = None
+    experience: Optional[List[dict]] = None
+    education: Optional[List[dict]] = None
 
     class Config:
         from_attributes = True

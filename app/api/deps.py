@@ -7,7 +7,7 @@ from typing import List, Callable
 from app.core.database import get_db
 from app.core.security import verify_token
 from app.core.cache import get_cached_user, set_cached_user
-from app.models.user import User, UserRole
+from app.models.user import User, UserRole, CompanyRole
 from app.models.company import Company
 import uuid
 import os
@@ -67,6 +67,7 @@ get_job_seeker = require_roles([UserRole.JOB_SEEKER])
 get_company_user = require_roles([UserRole.COMPANY_RECRUITER, UserRole.COMPANY_ADMIN])
 get_company_recruiter = require_roles([UserRole.COMPANY_RECRUITER, UserRole.COMPANY_ADMIN])
 get_company_admin = require_roles([UserRole.COMPANY_ADMIN])
+get_platform_admin = require_roles([UserRole.PLATFORM_ADMIN])
 
 
 async def get_company_user_with_verification(
@@ -87,6 +88,18 @@ async def get_company_user_with_verification(
         )
     
     return current_user
+
+
+def require_company_role(roles: list[str]) -> Callable:
+    """Require current user to be a company user with one of the specified company roles."""
+    def dep(current_user: User = Depends(get_company_user_with_verification)) -> User:
+        if current_user.company_role is None or current_user.company_role.value not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Required company roles: {roles}"
+            )
+        return current_user
+    return dep
 
 
 def require_company_access(current_user: User, company_id: uuid.UUID):

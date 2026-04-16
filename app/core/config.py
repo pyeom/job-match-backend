@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     # CDN base URL — when set, media URLs point here instead of the API
     media_cdn_url: Optional[str] = Field(default=None, env="MEDIA_CDN_URL")
 
+    # Anthropic API — optional; if absent, InsightsService falls back to templates
+    anthropic_api_key: Optional[str] = Field(default=None, env="ANTHROPIC_API_KEY")
+
+    workos_api_key: Optional[str] = Field(default=None, env="WORKOS_API_KEY")
+    workos_client_id: Optional[str] = Field(default=None, env="WORKOS_CLIENT_ID")
+
     @property
     def use_s3(self) -> bool:
         return bool(self.s3_bucket_name and self.s3_access_key_id and self.s3_secret_access_key)
@@ -123,6 +129,8 @@ class Settings(BaseSettings):
     smtp_password: str = Field(default="", env="SMTP_PASSWORD")
     smtp_from: str = Field(default="noreply@job-match.cl", env="SMTP_FROM")
     smtp_tls: bool = Field(default=True, env="SMTP_TLS")
+    # Admin alert email — receives fairness/model alerts; defaults to smtp_from
+    admin_alert_email: str = Field(default="", env="ADMIN_ALERT_EMAIL")
 
     # Public URL used in verification email links
     frontend_url: str = Field(default="http://localhost:8081", env="FRONTEND_URL")

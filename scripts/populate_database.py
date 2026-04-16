@@ -3,18 +3,20 @@
 Database Population Script for Job Match Backend
 
 This script populates the database with realistic sample data for ML-driven job matching:
-- 2 Complete Company Profiles with admin users
-- 6 Realistic Job Postings with embeddings
+- 2 Complete Company Profiles with admin users + 1 recruiter each
+- 6 Realistic Job Postings with embeddings (3 per company)
 - 3 Job Seeker Profiles with different skill sets and embeddings
-- Realistic swipe patterns and application data
+- 2 Teams per company with job assignments
+- Realistic swipe patterns and application data with stage history
 - Interaction data for ML training with scores
 
 Features:
 - Automatic embedding generation for jobs and users
 - ML scoring for job-user matches
-- Realistic application status progression
+- Realistic application status progression with ApplicationStageHistory
 - Multiple user personas for diverse testing
 - Safe re-run capability (handles existing data)
+- Full multi-tenant architecture compliance (teams, recruiters, pipeline templates)
 
 Usage:
     python populate_database.py --reset-db --all
@@ -45,8 +47,10 @@ from app.core.database import AsyncSessionLocal, engine, Base
 from app.models.user import User, UserRole
 from app.models.company import Company
 from app.models.job import Job
-from app.models.application import Application
+from app.models.application import Application, RevealedApplication
 from app.models.interaction import Interaction
+from app.models.team import CompanyTeam, TeamMember, TeamJobAssignment
+from app.models.pipeline import PipelineTemplate, ApplicationStageHistory
 from app.core.config import settings
 from app.services.embedding_service import embedding_service
 from app.services.scoring_service import scoring_service
@@ -92,7 +96,6 @@ class APIClient:
     def _decode_jwt_get_user_id(self, token: str) -> Optional[str]:
         """Decode JWT token to extract user ID (without verification for simplicity)"""
         try:
-            # Decode without verification for simplicity in development
             decoded = jwt.decode(token, options={"verify_signature": False})
             return decoded.get("sub")
         except Exception as e:
@@ -111,26 +114,41 @@ class APIClient:
         result = response.json()
         self.access_token = result.get("access_token")
         self.refresh_token = result.get("refresh_token")
-        # Extract user_id from JWT token
         user_id = self._decode_jwt_get_user_id(self.access_token)
         result["user_id"] = user_id
         logger.info(f"✅ Registered user: {user_data['email']}")
         return result
 
     async def register_company_user(self, user_data: Dict) -> Dict:
-        """Register a new company user with associated company"""
+        """Register a new company user (admin for new companies, recruiter for existing).
+
+        Only fields accepted by CompanyUserCreate are forwarded to the API.
+        company_founded_year and company_logo_url are NOT part of the registration
+        schema — they must be set via a direct DB update after registration.
+        """
+        api_payload = {
+            "email": user_data["email"],
+            "password": user_data["password"],
+            "full_name": user_data["full_name"],
+            "role": user_data["role"],
+            "company_name": user_data["company_name"],
+        }
+        # Optional company fields supported by CompanyUserCreate
+        for field in ("company_description", "company_website", "company_industry",
+                      "company_size", "company_location", "device_name", "platform"):
+            if field in user_data:
+                api_payload[field] = user_data[field]
+
         url = f"{self.base_url}/api/v1/auth/register-company"
-        response = await self.client.post(url, json=user_data)
+        response = await self.client.post(url, json=api_payload)
 
         if response.status_code != 200:
             logger.error(f"Company user registration failed: {response.text}")
             raise DatabasePopulationError(f"Company user registration failed: {response.text}")
 
         result = response.json()
-        # Update tokens for this user
         self.access_token = result.get("access_token")
         self.refresh_token = result.get("refresh_token")
-        # Extract user_id from JWT token
         user_id = self._decode_jwt_get_user_id(self.access_token)
         result["user_id"] = user_id
         logger.info(f"✅ Registered company user: {user_data['email']} for {user_data['company_name']}")
@@ -148,7 +166,6 @@ class APIClient:
         result = response.json()
         self.access_token = result.get("access_token")
         self.refresh_token = result.get("refresh_token")
-        # Extract user_id from JWT token
         user_id = self._decode_jwt_get_user_id(self.access_token)
         result["user_id"] = user_id
         logger.info(f"✅ Logged in as: {email}")
@@ -198,9 +215,7 @@ class APIClient:
             logger.error(f"Profile update failed: {response.text}")
             raise DatabasePopulationError(f"Profile update failed: {response.text}")
 
-        result = response.json()
-        logger.info(f"✅ Updated user profile")
-        return result
+        return response.json()
 
     async def health_check(self) -> bool:
         """Check if the API is running"""
@@ -223,16 +238,30 @@ class DatabasePopulator:
         self.created_companies: List[Dict] = []
         self.created_jobs: List[Dict] = []
         self.created_users: List[Dict] = []
+        self.created_recruiters: List[Dict] = []
+        self.created_teams: List[Dict] = []
 
     async def reset_database(self) -> None:
-        """Reset the database by removing all data"""
+        """Reset the database by removing all data.
+
+        Deletion order respects foreign-key constraints:
+          ApplicationStageHistory → RevealedApplication → Interaction → Application
+          → TeamJobAssignment → TeamMember → CompanyTeam
+          → PipelineTemplate → Job → User → Company
+        """
         logger.info("🔄 Resetting database...")
 
         async with AsyncSessionLocal() as session:
             try:
-                # Delete in proper order to respect foreign keys
+                # Child tables first
+                await session.execute(delete(ApplicationStageHistory))
+                await session.execute(delete(RevealedApplication))
                 await session.execute(delete(Interaction))
                 await session.execute(delete(Application))
+                await session.execute(delete(TeamJobAssignment))
+                await session.execute(delete(TeamMember))
+                await session.execute(delete(CompanyTeam))
+                await session.execute(delete(PipelineTemplate))
                 await session.execute(delete(Job))
                 await session.execute(delete(User))
                 await session.execute(delete(Company))
@@ -246,66 +275,92 @@ class DatabasePopulator:
                 raise DatabasePopulationError(f"Database reset failed: {e}")
 
     async def create_companies(self) -> List[Dict]:
-        """Create the two company profiles with admin users"""
+        """Create the two company profiles with admin users.
+
+        After API registration (which doesn't accept founded_year/logo_url),
+        we patch those fields directly via SQLAlchemy.
+        """
         logger.info("🏢 Creating company profiles...")
 
         companies_data = [
             {
                 "company_name": "TechVision Solutions",
-                "company_description": "A mid-size technology company specializing in AI/ML solutions and innovative software development. We help businesses transform their operations through cutting-edge artificial intelligence and machine learning technologies. Our team of expert engineers and data scientists work collaboratively to deliver scalable, efficient, and impactful solutions.",
+                "company_description": (
+                    "A mid-size technology company specializing in AI/ML solutions and "
+                    "innovative software development. We help businesses transform their "
+                    "operations through cutting-edge artificial intelligence and machine "
+                    "learning technologies."
+                ),
                 "company_website": "https://techvision.com",
                 "company_industry": "Technology",
                 "company_size": "201-1000",
                 "company_location": "San Francisco, CA",
-                "company_founded_year": 2015,
-                "company_logo_url": "https://techvision.com/logo.png",
+                # These are not in CompanyUserCreate — applied via direct DB update below
+                "_founded_year": 2015,
+                "_logo_url": "https://techvision.com/logo.png",
                 "email": "admin@techvision.com",
                 "password": "techvision_admin_2024",
                 "full_name": "Sarah Chen",
-                "role": "company_admin"
+                "role": "admin",
             },
             {
                 "company_name": "DataFlow Innovations",
-                "company_description": "A growing startup focused on data analytics and business intelligence platforms. We empower organizations to make data-driven decisions through intuitive analytics tools, real-time dashboards, and advanced data processing capabilities. Our mission is to democratize data analytics for businesses of all sizes.",
+                "company_description": (
+                    "A growing startup focused on data analytics and business intelligence "
+                    "platforms. We empower organizations to make data-driven decisions "
+                    "through intuitive analytics tools and real-time dashboards."
+                ),
                 "company_website": "https://dataflow.io",
                 "company_industry": "Data Analytics",
                 "company_size": "11-50",
                 "company_location": "Austin, TX",
-                "company_founded_year": 2020,
-                "company_logo_url": "https://dataflow.io/assets/logo.svg",
+                "_founded_year": 2020,
+                "_logo_url": "https://dataflow.io/assets/logo.svg",
                 "email": "admin@dataflow.io",
                 "password": "dataflow_admin_2024",
                 "full_name": "Michael Rodriguez",
-                "role": "company_admin"
-            }
+                "role": "admin",
+            },
         ]
 
         created_companies = []
 
         for company_data in companies_data:
             try:
-                # Register company user (this creates both company and admin user)
                 result = await self.api_client.register_company_user(company_data)
 
-                # Store tokens for later use
                 self.company_tokens[company_data["company_name"]] = {
                     "access_token": result["access_token"],
                     "refresh_token": result["refresh_token"],
                     "email": company_data["email"],
-                    "password": company_data["password"]
+                    "password": company_data["password"],
                 }
 
-                # Get the company profile to return complete data
                 user_id = result.get("user_id")
                 profile = await self.api_client.get_user_profile(user_id)
+                company_id = profile["company_id"]
+
+                # Set founded_year and logo_url directly — not exposed by CompanyUpdate schema
+                founded_year = company_data.get("_founded_year")
+                logo_url = company_data.get("_logo_url")
+                if founded_year or logo_url:
+                    async with AsyncSessionLocal() as session:
+                        db_company = await session.get(Company, uuid.UUID(company_id))
+                        if db_company:
+                            if founded_year:
+                                db_company.founded_year = founded_year
+                            if logo_url:
+                                db_company.logo_url = logo_url
+                            await session.commit()
+
                 created_companies.append({
                     "company_name": company_data["company_name"],
                     "admin_email": company_data["email"],
                     "admin_name": company_data["full_name"],
-                    "company_id": profile["company_id"],
+                    "company_id": company_id,
                     "user_id": user_id,
                     "tokens": result,
-                    "profile": profile
+                    "profile": profile,
                 })
 
                 logger.info(f"✅ Created company: {company_data['company_name']}")
@@ -317,6 +372,55 @@ class DatabasePopulator:
         self.created_companies = created_companies
         return created_companies
 
+    async def create_recruiters(self) -> List[Dict]:
+        """Add one recruiter per company (second user — gets RECRUITER company_role automatically)."""
+        logger.info("👔 Creating recruiter users...")
+
+        if not self.created_companies:
+            logger.warning("⚠️  No companies found. Skipping recruiter creation.")
+            return []
+
+        recruiters_data = [
+            {
+                "company_name": "TechVision Solutions",
+                "email": "recruiter@techvision.com",
+                "password": "techvision_recruiter_2024",
+                "full_name": "James Park",
+                "role": "recruiter",
+            },
+            {
+                "company_name": "DataFlow Innovations",
+                "email": "recruiter@dataflow.io",
+                "password": "dataflow_recruiter_2024",
+                "full_name": "Ana Lima",
+                "role": "recruiter",
+            },
+        ]
+
+        created_recruiters = []
+
+        for recruiter_data in recruiters_data:
+            try:
+                result = await self.api_client.register_company_user(recruiter_data)
+                user_id = result.get("user_id")
+
+                created_recruiters.append({
+                    "company_name": recruiter_data["company_name"],
+                    "email": recruiter_data["email"],
+                    "name": recruiter_data["full_name"],
+                    "user_id": user_id,
+                    "password": recruiter_data["password"],
+                })
+
+                logger.info(f"✅ Created recruiter: {recruiter_data['email']} at {recruiter_data['company_name']}")
+
+            except Exception as e:
+                logger.error(f"❌ Failed to create recruiter {recruiter_data['email']}: {e}")
+                raise
+
+        self.created_recruiters = created_recruiters
+        return created_recruiters
+
     async def create_jobs(self) -> List[Dict]:
         """Create 6 realistic job postings (3 per company)"""
         logger.info("📝 Creating job postings...")
@@ -327,7 +431,10 @@ class DatabasePopulator:
                 "company": "TechVision Solutions",
                 "title": "Senior Machine Learning Engineer",
                 "location": "Remote",
-                "short_description": "Join our AI/ML team to build next-generation machine learning systems that power our core products. Work on large-scale ML pipelines, model optimization, and deployment strategies.",
+                "short_description": (
+                    "Join our AI/ML team to build next-generation machine learning systems "
+                    "that power our core products."
+                ),
                 "description": """Join our AI/ML team to build next-generation machine learning systems that power our core products. You'll work on large-scale ML pipelines, model optimization, and deployment strategies.
 
 Key Responsibilities:
@@ -349,13 +456,16 @@ We offer competitive compensation, equity, comprehensive benefits, and the oppor
                 "seniority": "Senior",
                 "salary_min": 140000,
                 "salary_max": 180000,
-                "remote": True
+                "remote": True,
             },
             {
                 "company": "TechVision Solutions",
                 "title": "Full Stack Developer",
                 "location": "San Francisco, CA",
-                "short_description": "Build and maintain web applications that serve our growing user base. Work in a collaborative environment with modern technologies and agile methodologies.",
+                "short_description": (
+                    "Build and maintain web applications that serve our growing user base "
+                    "using modern technologies and agile methodologies."
+                ),
                 "description": """Build and maintain web applications that serve our growing user base. Work in a collaborative environment with modern technologies and agile methodologies.
 
 Key Responsibilities:
@@ -379,13 +489,16 @@ Join our dynamic team and help shape the future of our platform while growing yo
                 "seniority": "Mid",
                 "salary_min": 90000,
                 "salary_max": 130000,
-                "remote": False
+                "remote": False,
             },
             {
                 "company": "TechVision Solutions",
                 "title": "DevOps Engineer",
                 "location": "Remote",
-                "short_description": "Build and maintain scalable infrastructure for our AI/ML platform. Work with cutting-edge cloud technologies and automation tools to ensure reliable deployments.",
+                "short_description": (
+                    "Build and maintain scalable infrastructure for our AI/ML platform "
+                    "using cutting-edge cloud technologies."
+                ),
                 "description": """Build and maintain scalable infrastructure for our AI/ML platform. Work with cutting-edge cloud technologies and automation tools to ensure reliable deployments and monitoring.
 
 Key Responsibilities:
@@ -409,14 +522,17 @@ Work with a talented team building the future of AI infrastructure.""",
                 "seniority": "Senior",
                 "salary_min": 120000,
                 "salary_max": 160000,
-                "remote": True
+                "remote": True,
             },
             # DataFlow Innovations Jobs
             {
                 "company": "DataFlow Innovations",
                 "title": "Data Scientist",
                 "location": "Remote",
-                "short_description": "Drive data-driven insights and build predictive models that power our analytics platform. Work with large datasets and cutting-edge analytics technologies.",
+                "short_description": (
+                    "Drive data-driven insights and build predictive models that power "
+                    "our analytics platform."
+                ),
                 "description": """Drive data-driven insights and build predictive models that power our analytics platform. Work with large datasets and cutting-edge analytics technologies.
 
 Key Responsibilities:
@@ -440,13 +556,16 @@ Be part of a growing team that's revolutionizing how businesses understand their
                 "seniority": "Senior",
                 "salary_min": 110000,
                 "salary_max": 150000,
-                "remote": True
+                "remote": True,
             },
             {
                 "company": "DataFlow Innovations",
                 "title": "Frontend Developer",
                 "location": "Austin, TX",
-                "short_description": "Create beautiful and intuitive user interfaces for our data analytics platform. Work closely with designers and backend developers to deliver exceptional user experiences.",
+                "short_description": (
+                    "Create beautiful and intuitive user interfaces for our data analytics "
+                    "platform, working closely with designers and backend developers."
+                ),
                 "description": """Create beautiful and intuitive user interfaces for our data analytics platform. Work closely with designers and backend developers to deliver exceptional user experiences.
 
 Key Responsibilities:
@@ -470,13 +589,16 @@ Join our fast-growing startup and help build the next generation of analytics to
                 "seniority": "Mid",
                 "salary_min": 70000,
                 "salary_max": 100000,
-                "remote": False
+                "remote": False,
             },
             {
                 "company": "DataFlow Innovations",
                 "title": "Backend Engineer",
                 "location": "Austin, TX",
-                "short_description": "Build robust and scalable backend systems that power our data analytics platform. Work with modern technologies and microservices architecture to handle large-scale data processing.",
+                "short_description": (
+                    "Build robust and scalable backend systems using microservices "
+                    "architecture to handle large-scale data processing."
+                ),
                 "description": """Build robust and scalable backend systems that power our data analytics platform. Work with modern technologies and microservices architecture to handle large-scale data processing.
 
 Key Responsibilities:
@@ -500,43 +622,32 @@ Join our growing engineering team and help scale our data platform to millions o
                 "seniority": "Mid",
                 "salary_min": 85000,
                 "salary_max": 120000,
-                "remote": False
-            }
+                "remote": False,
+            },
         ]
 
         created_jobs = []
 
         for job_data in jobs_data:
             try:
-                # Login as the company admin
                 company_name = job_data["company"]
                 company_tokens = self.company_tokens[company_name]
 
-                await self.api_client.login(
-                    company_tokens["email"],
-                    company_tokens["password"]
-                )
-
-                # Get the company profile to extract company_id
-                # We need to get the user_id from the tokens to call the profile endpoint
                 login_result = await self.api_client.login(
                     company_tokens["email"],
-                    company_tokens["password"]
+                    company_tokens["password"],
                 )
                 user_id = login_result.get("user_id")
                 profile = await self.api_client.get_user_profile(user_id)
                 company_id = profile["company_id"]
 
-                # Remove company from job data as it's not needed for API call
                 job_payload = {k: v for k, v in job_data.items() if k != "company"}
-
-                # Create the job using company-scoped endpoint
                 result = await self.api_client.create_job(job_payload, company_id)
 
                 created_jobs.append({
                     "company": company_name,
                     "job_data": result,
-                    "original_data": job_data
+                    "original_data": job_data,
                 })
 
                 logger.info(f"✅ Created job: {job_data['title']} at {company_name}")
@@ -548,6 +659,90 @@ Join our growing engineering team and help scale our data platform to millions o
         self.created_jobs = created_jobs
         return created_jobs
 
+    async def create_teams(self) -> List[Dict]:
+        """Create one team per company with members and job assignments.
+
+        Each company gets:
+          - "Engineering" team — admin user + recruiter + all company jobs
+        Teams and membership are created directly via SQLAlchemy to avoid
+        requiring email verification for the team management endpoints.
+        """
+        logger.info("👥 Creating teams...")
+
+        if not self.created_companies:
+            logger.warning("⚠️  No companies found. Skipping team creation.")
+            return []
+
+        created_teams = []
+
+        async with AsyncSessionLocal() as session:
+            try:
+                for company_info in self.created_companies:
+                    company_id = uuid.UUID(company_info["company_id"])
+                    company_name = company_info["company_name"]
+
+                    # Collect all user IDs for this company
+                    company_user_ids: List[uuid.UUID] = [uuid.UUID(company_info["user_id"])]
+                    for rec in self.created_recruiters:
+                        if rec["company_name"] == company_name:
+                            company_user_ids.append(uuid.UUID(rec["user_id"]))
+
+                    # Collect all job IDs for this company
+                    company_job_ids = [
+                        uuid.UUID(j["job_data"]["id"])
+                        for j in self.created_jobs
+                        if j["company"] == company_name
+                    ]
+
+                    # Create "Engineering" team
+                    team = CompanyTeam(
+                        id=uuid.uuid4(),
+                        company_id=company_id,
+                        name="Engineering",
+                        description="Core engineering hiring team",
+                    )
+                    session.add(team)
+                    await session.flush()
+
+                    # Add members
+                    for idx, uid in enumerate(company_user_ids):
+                        member_role = "lead" if idx == 0 else "member"
+                        session.add(TeamMember(
+                            team_id=team.id,
+                            user_id=uid,
+                            role=member_role,
+                        ))
+
+                    # Assign all company jobs to this team
+                    for job_id in company_job_ids:
+                        session.add(TeamJobAssignment(
+                            team_id=team.id,
+                            job_id=job_id,
+                        ))
+
+                    created_teams.append({
+                        "company_name": company_name,
+                        "team_id": str(team.id),
+                        "team_name": team.name,
+                        "member_count": len(company_user_ids),
+                        "job_count": len(company_job_ids),
+                    })
+
+                    logger.info(
+                        f"✅ Created team '{team.name}' for {company_name} "
+                        f"({len(company_user_ids)} members, {len(company_job_ids)} jobs)"
+                    )
+
+                await session.commit()
+
+            except Exception as e:
+                await session.rollback()
+                logger.error(f"❌ Failed to create teams: {e}")
+                raise DatabasePopulationError(f"Failed to create teams: {e}")
+
+        self.created_teams = created_teams
+        return created_teams
+
     async def create_job_seekers(self) -> List[Dict]:
         """Create multiple job seeker profiles with different backgrounds"""
         logger.info("👤 Creating job seeker profiles...")
@@ -558,7 +753,7 @@ Join our growing engineering team and help scale our data platform to millions o
                     "email": "alex.johnson@email.com",
                     "password": "jobseeker_2024",
                     "full_name": "Alex Johnson",
-                    "role": "job_seeker"
+                    "role": "job_seeker",
                 },
                 "profile_data": {
                     "headline": "Full Stack Developer with 4 years experience in modern web technologies",
@@ -566,19 +761,26 @@ Join our growing engineering team and help scale our data platform to millions o
                     "skills": [
                         "JavaScript", "Python", "React", "Node.js", "PostgreSQL",
                         "MongoDB", "Docker", "AWS", "Git", "TypeScript", "Machine Learning",
-                        "REST APIs", "GraphQL", "HTML", "CSS", "TensorFlow"
+                        "REST APIs", "GraphQL", "HTML", "CSS", "TensorFlow",
                     ],
                     "preferred_locations": ["Remote", "San Francisco, CA", "Austin, TX", "Seattle, WA"],
                     "seniority": "Mid",
-                    "phone": "+1-555-0123"
-                }
+                    "phone": "+1-555-0123",
+                    "experience": [
+                        {"title": "Full Stack Developer", "company": "TechCorp Inc.", "description": "Built scalable web apps using React, Node.js and PostgreSQL. Led a team of 3 engineers.", "start_date": "2021-03-01", "end_date": None},
+                        {"title": "Junior Developer", "company": "Startup Studio", "description": "Developed REST APIs and frontend components for SaaS products.", "start_date": "2019-06-01", "end_date": "2021-02-28"},
+                    ],
+                    "education": [
+                        {"degree": "B.Sc. Computer Science", "institution": "University of Texas", "description": "Focus on algorithms, distributed systems and databases.", "start_date": "2015-09-01", "end_date": "2019-05-31"},
+                    ],
+                },
             },
             {
                 "user_data": {
                     "email": "sarah.devops@email.com",
                     "password": "devops_2024",
                     "full_name": "Sarah Martinez",
-                    "role": "job_seeker"
+                    "role": "job_seeker",
                 },
                 "profile_data": {
                     "headline": "Senior DevOps Engineer specializing in cloud infrastructure and automation",
@@ -586,19 +788,27 @@ Join our growing engineering team and help scale our data platform to millions o
                     "skills": [
                         "AWS", "Docker", "Kubernetes", "Terraform", "Python", "CI/CD",
                         "Prometheus", "Grafana", "Infrastructure", "DevOps", "Jenkins",
-                        "Ansible", "CloudFormation", "Linux", "Monitoring"
+                        "Ansible", "CloudFormation", "Linux", "Monitoring",
                     ],
                     "preferred_locations": ["Remote", "San Francisco, CA", "New York, NY"],
                     "seniority": "Senior",
-                    "phone": "+1-555-0456"
-                }
+                    "phone": "+1-555-0456",
+                    "experience": [
+                        {"title": "Senior DevOps Engineer", "company": "CloudScale Solutions", "description": "Managed multi-cloud infrastructure (AWS/GCP) for 50+ microservices. Reduced deployment time by 70%.", "start_date": "2020-01-01", "end_date": None},
+                        {"title": "DevOps Engineer", "company": "FinTech Dynamics", "description": "Built CI/CD pipelines with Jenkins and GitHub Actions. Containerized legacy apps with Docker/Kubernetes.", "start_date": "2017-04-01", "end_date": "2019-12-31"},
+                        {"title": "Systems Administrator", "company": "Data Networks Ltd.", "description": "Linux server management, automation scripting and monitoring with Grafana/Prometheus.", "start_date": "2015-06-01", "end_date": "2017-03-31"},
+                    ],
+                    "education": [
+                        {"degree": "B.Sc. Information Technology", "institution": "San Francisco State University", "description": "Networking, security and systems programming.", "start_date": "2011-09-01", "end_date": "2015-05-31"},
+                    ],
+                },
             },
             {
                 "user_data": {
                     "email": "michael.datascience@email.com",
                     "password": "datascience_2024",
                     "full_name": "Michael Chen",
-                    "role": "job_seeker"
+                    "role": "job_seeker",
                 },
                 "profile_data": {
                     "headline": "Data Scientist with expertise in ML model development and statistical analysis",
@@ -606,13 +816,21 @@ Join our growing engineering team and help scale our data platform to millions o
                     "skills": [
                         "Python", "R", "SQL", "Pandas", "Scikit-learn", "Machine Learning",
                         "Statistics", "Data Visualization", "Tableau", "Apache Spark",
-                        "TensorFlow", "PyTorch", "Jupyter", "NumPy", "Matplotlib"
+                        "TensorFlow", "PyTorch", "Jupyter", "NumPy", "Matplotlib",
                     ],
                     "preferred_locations": ["Remote", "Austin, TX", "Boston, MA", "Chicago, IL"],
                     "seniority": "Senior",
-                    "phone": "+1-555-0789"
-                }
-            }
+                    "phone": "+1-555-0789",
+                    "experience": [
+                        {"title": "Senior Data Scientist", "company": "Predictive Analytics Co.", "description": "Developed ML pipelines for churn prediction and revenue forecasting. Models served 2M+ users.", "start_date": "2020-07-01", "end_date": None},
+                        {"title": "Data Scientist", "company": "HealthTech AI", "description": "Built classification models for medical image analysis using PyTorch and TensorFlow.", "start_date": "2018-01-01", "end_date": "2020-06-30"},
+                    ],
+                    "education": [
+                        {"degree": "Ph.D. Statistics", "institution": "MIT", "description": "Research on Bayesian methods and causal inference. 4 published papers.", "start_date": "2013-09-01", "end_date": "2018-06-30"},
+                        {"degree": "B.Sc. Mathematics", "institution": "Princeton University", "description": "Minor in Computer Science.", "start_date": "2009-09-01", "end_date": "2013-05-31"},
+                    ],
+                },
+            },
         ]
 
         created_users = []
@@ -622,30 +840,26 @@ Join our growing engineering team and help scale our data platform to millions o
                 user_data = user_info["user_data"]
                 profile_data = user_info["profile_data"]
 
-                # Register the user
                 result = await self.api_client.register_user(user_data)
-
-                # Update the profile with additional information
                 user_id = result.get("user_id")
                 updated_profile = await self.api_client.update_user_profile(profile_data, user_id)
 
                 created_user = {
                     "email": user_data["email"],
                     "name": user_data["full_name"],
+                    "password": user_data["password"],
                     "tokens": result,
-                    "profile": updated_profile
+                    "profile": updated_profile,
                 }
-
                 created_users.append(created_user)
                 logger.info(f"✅ Created job seeker: {user_data['email']}")
 
-                # Store the first user's tokens for backwards compatibility
                 if not self.job_seeker_tokens:
                     self.job_seeker_tokens = {
                         "access_token": result["access_token"],
                         "refresh_token": result["refresh_token"],
                         "email": user_data["email"],
-                        "password": user_data["password"]
+                        "password": user_data["password"],
                     }
 
             except Exception as e:
@@ -656,7 +870,7 @@ Join our growing engineering team and help scale our data platform to millions o
         return created_users
 
     async def create_sample_applications(self) -> List[Dict]:
-        """Create sample applications with varied stages and statuses"""
+        """Create sample applications with varied stages, statuses, and stage history."""
         logger.info("📋 Creating sample applications...")
 
         if not self.created_users or not self.created_jobs:
@@ -664,68 +878,93 @@ Join our growing engineering team and help scale our data platform to millions o
             return []
 
         stages = ['SUBMITTED', 'REVIEW', 'INTERVIEW', 'TECHNICAL', 'DECISION']
-        statuses = ['ACTIVE', 'HIRED', 'REJECTED']
-
         rejection_reasons = [
             'Not enough experience',
             'Skills mismatch',
             'Compensation expectations too high',
             'Position filled',
             'Not a cultural fit',
-            'Candidate withdrew application'
+            'Candidate withdrew application',
         ]
 
         created_applications = []
 
         async with AsyncSessionLocal() as session:
             try:
-                # Get all job and user IDs
                 job_ids = [uuid.UUID(job["job_data"]["id"]) for job in self.created_jobs]
                 user_ids = [uuid.UUID(user["profile"]["id"]) for user in self.created_users]
 
-                # Create 2-4 applications per job
                 for job_data in self.created_jobs:
                     job_id = uuid.UUID(job_data["job_data"]["id"])
                     num_applications = random.randint(2, 4)
-
-                    # Select random users for this job (avoid duplicates)
                     selected_users = random.sample(user_ids, min(num_applications, len(user_ids)))
 
                     for user_id in selected_users:
-                        # Distribute across stages realistically - more in early stages
-                        stage_weights = [0.4, 0.25, 0.15, 0.1, 0.1]  # More in SUBMITTED, fewer in DECISION
+                        # Distribute across stages realistically
+                        stage_weights = [0.4, 0.25, 0.15, 0.1, 0.1]
                         stage = random.choices(stages, weights=stage_weights)[0]
 
-                        # Determine status based on stage
                         if stage == 'DECISION':
-                            # In DECISION stage, higher chance of terminal state
-                            status = random.choices(['ACTIVE', 'HIRED', 'REJECTED'], weights=[0.3, 0.4, 0.3])[0]
+                            status = random.choices(
+                                ['ACTIVE', 'HIRED', 'REJECTED'], weights=[0.3, 0.4, 0.3]
+                            )[0]
                         else:
-                            # In other stages, mostly ACTIVE, some REJECTED
-                            status = random.choices(['ACTIVE', 'REJECTED'], weights=[0.85, 0.15])[0]
+                            status = random.choices(
+                                ['ACTIVE', 'REJECTED'], weights=[0.85, 0.15]
+                            )[0]
 
-                        # Set rejection_reason if REJECTED
                         rejection_reason = None
                         if status == 'REJECTED':
                             rejection_reason = random.choice(rejection_reasons)
 
-                        # Create application
+                        # Build stage_history JSONB — track path from SUBMITTED to current stage
+                        stage_path = stages[:stages.index(stage) + 1]
+                        stage_history_json = []
+                        base_time = datetime.utcnow() - timedelta(days=random.randint(1, 60))
+                        for i in range(len(stage_path) - 1):
+                            stage_history_json.append({
+                                "from_stage": stage_path[i],
+                                "to_stage": stage_path[i + 1],
+                                "timestamp": (base_time + timedelta(days=i + 1)).isoformat(),
+                                "changed_by": None,
+                            })
+
                         application = Application(
+                            id=uuid.uuid4(),
                             user_id=user_id,
                             job_id=job_id,
                             stage=stage,
                             status=status,
                             stage_updated_at=datetime.utcnow() - timedelta(days=random.randint(0, 30)),
                             rejection_reason=rejection_reason,
-                            stage_history=[],  # Empty history for new applications
-                            created_at=datetime.utcnow() - timedelta(days=random.randint(1, 60))
+                            stage_history=stage_history_json,
+                            created_at=base_time,
                         )
                         session.add(application)
+                        await session.flush()
+
+                        # Create ApplicationStageHistory rows for each transition
+                        for i, transition in enumerate(stage_history_json):
+                            entered = datetime.fromisoformat(transition["timestamp"])
+                            exited = (
+                                datetime.fromisoformat(stage_history_json[i + 1]["timestamp"])
+                                if i + 1 < len(stage_history_json)
+                                else None
+                            )
+                            session.add(ApplicationStageHistory(
+                                id=uuid.uuid4(),
+                                application_id=application.id,
+                                stage_order=stages.index(transition["to_stage"]) + 1,
+                                stage_name=transition["to_stage"],
+                                entered_at=entered,
+                                exited_at=exited,
+                            ))
+
                         created_applications.append({
                             "user_id": str(user_id),
                             "job_id": str(job_id),
                             "stage": stage,
-                            "status": status
+                            "status": status,
                         })
 
                 await session.commit()
@@ -744,25 +983,30 @@ Join our growing engineering team and help scale our data platform to millions o
 
         validation_results = {
             "companies": len(self.created_companies),
+            "recruiters": len(self.created_recruiters),
             "jobs": len(self.created_jobs),
             "users": len(self.created_users),
+            "teams": len(self.created_teams),
             "success": True,
-            "errors": []
+            "errors": [],
         }
 
-        # Validate companies
         if len(self.created_companies) != 2:
-            validation_results["errors"].append(f"Expected 2 companies, found {len(self.created_companies)}")
+            validation_results["errors"].append(
+                f"Expected 2 companies, found {len(self.created_companies)}"
+            )
             validation_results["success"] = False
 
-        # Validate jobs
         if len(self.created_jobs) != 6:
-            validation_results["errors"].append(f"Expected 6 jobs, found {len(self.created_jobs)}")
+            validation_results["errors"].append(
+                f"Expected 6 jobs, found {len(self.created_jobs)}"
+            )
             validation_results["success"] = False
 
-        # Validate users
         if len(self.created_users) != 3:
-            validation_results["errors"].append(f"Expected 3 job seekers, found {len(self.created_users)}")
+            validation_results["errors"].append(
+                f"Expected 3 job seekers, found {len(self.created_users)}"
+            )
             validation_results["success"] = False
 
         if validation_results["success"]:
@@ -780,31 +1024,46 @@ Join our growing engineering team and help scale our data platform to millions o
             "timestamp": datetime.now().isoformat(),
             "summary": {
                 "companies_created": len(self.created_companies),
+                "recruiters_created": len(self.created_recruiters),
                 "jobs_created": len(self.created_jobs),
-                "users_created": len(self.created_users)
+                "users_created": len(self.created_users),
+                "teams_created": len(self.created_teams),
             },
             "companies": [],
+            "recruiters": [],
             "jobs": [],
             "users": [],
-            "login_credentials": []
+            "teams": [],
+            "login_credentials": [],
         }
 
-        # Company details
         for company in self.created_companies:
             report["companies"].append({
                 "name": company["company_name"],
                 "admin_email": company["admin_email"],
-                "admin_name": company["admin_name"]
+                "admin_name": company["admin_name"],
+                "company_id": company["company_id"],
             })
-
             report["login_credentials"].append({
                 "type": "Company Admin",
                 "company": company["company_name"],
                 "email": company["admin_email"],
-                "password": self.company_tokens[company["company_name"]]["password"]
+                "password": self.company_tokens[company["company_name"]]["password"],
             })
 
-        # Job details
+        for rec in self.created_recruiters:
+            report["recruiters"].append({
+                "company": rec["company_name"],
+                "name": rec["name"],
+                "email": rec["email"],
+            })
+            report["login_credentials"].append({
+                "type": "Company Recruiter",
+                "company": rec["company_name"],
+                "email": rec["email"],
+                "password": rec["password"],
+            })
+
         for job in self.created_jobs:
             report["jobs"].append({
                 "title": job["job_data"]["title"],
@@ -813,32 +1072,29 @@ Join our growing engineering team and help scale our data platform to millions o
                 "seniority": job["job_data"]["seniority"],
                 "salary_range": f"${job['job_data']['salary_min']:,} - ${job['job_data']['salary_max']:,}",
                 "remote": job["job_data"]["remote"],
-                "job_id": job["job_data"]["id"]
+                "job_id": job["job_data"]["id"],
             })
 
-        # User details
         for user in self.created_users:
             report["users"].append({
                 "email": user["email"],
                 "name": user["name"],
                 "skills": user["profile"]["skills"],
                 "seniority": user["profile"]["seniority"],
-                "preferred_locations": user["profile"]["preferred_locations"]
+                "preferred_locations": user["profile"]["preferred_locations"],
             })
-
-            # Find password from job seeker data
-            password = "jobseeker_2024"  # Default
-            if user["email"] == "alex.johnson@email.com":
-                password = "jobseeker_2024"
-            elif user["email"] == "sarah.devops@email.com":
-                password = "devops_2024"
-            elif user["email"] == "michael.datascience@email.com":
-                password = "datascience_2024"
-
             report["login_credentials"].append({
                 "type": "Job Seeker",
                 "email": user["email"],
-                "password": password
+                "password": user["password"],
+            })
+
+        for team in self.created_teams:
+            report["teams"].append({
+                "company": team["company_name"],
+                "name": team["team_name"],
+                "members": team["member_count"],
+                "jobs": team["job_count"],
             })
 
         return report
@@ -848,8 +1104,8 @@ async def main():
     """Main function with CLI interface"""
     parser = argparse.ArgumentParser(description="Database Population for Job Match Backend")
     parser.add_argument("--reset-db", action="store_true", help="Reset database before population")
-    parser.add_argument("--all", action="store_true", help="Create all data (companies, jobs, users)")
-    parser.add_argument("--companies-only", action="store_true", help="Create only companies")
+    parser.add_argument("--all", action="store_true", help="Create all data (companies, jobs, users, teams)")
+    parser.add_argument("--companies-only", action="store_true", help="Create only companies + recruiters")
     parser.add_argument("--jobs-only", action="store_true", help="Create only jobs (requires existing companies)")
     parser.add_argument("--users-only", action="store_true", help="Create only job seeker users")
     parser.add_argument("--validate-only", action="store_true", help="Only validate existing data")
@@ -858,11 +1114,9 @@ async def main():
 
     args = parser.parse_args()
 
-    # Default to --all if no specific action is specified
     if not any([args.all, args.companies_only, args.jobs_only, args.users_only, args.validate_only]):
         args.all = True
 
-    # Check if API is running
     async with APIClient(args.api_url) as api_client:
         if not await api_client.health_check():
             logger.error(f"❌ API is not running at {args.api_url}")
@@ -874,13 +1128,12 @@ async def main():
         populator = DatabasePopulator(api_client)
 
         try:
-            # Reset database if requested
             if args.reset_db:
                 await populator.reset_database()
 
-            # Create data based on arguments
             if args.all or args.companies_only:
                 await populator.create_companies()
+                await populator.create_recruiters()
 
             if args.all or args.jobs_only:
                 if not populator.created_companies and not args.jobs_only:
@@ -891,11 +1144,10 @@ async def main():
             if args.all or args.users_only:
                 await populator.create_job_seekers()
 
-            # Create sample applications
             if args.all:
+                await populator.create_teams()
                 await populator.create_sample_applications()
 
-            # Validate data
             if not args.validate_only:
                 validation = await populator.validate_data()
                 if not validation["success"]:
@@ -904,52 +1156,62 @@ async def main():
                         logger.error(f"   {error}")
                     sys.exit(1)
 
-            # Generate and display summary report
             report = await populator.generate_summary_report()
 
-            print("\n" + "="*80)
+            print("\n" + "=" * 80)
             print("🎉 DATABASE POPULATION COMPLETED SUCCESSFULLY!")
-            print("="*80)
-            print(f"Companies Created: {report['summary']['companies_created']}")
-            print(f"Jobs Created: {report['summary']['jobs_created']}")
-            print(f"Users Created: {report['summary']['users_created']}")
+            print("=" * 80)
+            print(f"Companies Created:  {report['summary']['companies_created']}")
+            print(f"Recruiters Created: {report['summary']['recruiters_created']}")
+            print(f"Jobs Created:       {report['summary']['jobs_created']}")
+            print(f"Users Created:      {report['summary']['users_created']}")
+            print(f"Teams Created:      {report['summary']['teams_created']}")
 
-            print("\n📊 CREATED COMPANIES:")
+            print("\n🏢 CREATED COMPANIES:")
             for company in report["companies"]:
-                print(f"  • {company['name']} - Admin: {company['admin_name']} ({company['admin_email']})")
+                print(f"  • {company['name']} — Admin: {company['admin_name']} ({company['admin_email']})")
+
+            if report["recruiters"]:
+                print("\n👔 CREATED RECRUITERS:")
+                for rec in report["recruiters"]:
+                    print(f"  • {rec['name']} ({rec['email']}) @ {rec['company']}")
 
             print("\n📝 CREATED JOBS:")
             for job in report["jobs"]:
+                remote_label = "Remote" if job["remote"] else job["location"]
                 print(f"  • {job['title']} at {job['company']}")
-                print(f"    Location: {job['location']} | Seniority: {job['seniority']} | Remote: {job['remote']}")
-                print(f"    Salary: {job['salary_range']}")
+                print(f"    {remote_label} | {job['seniority']} | {job['salary_range']}")
 
             print("\n👤 CREATED USERS:")
             for user in report["users"]:
-                print(f"  • {user['name']} ({user['email']})")
-                print(f"    Seniority: {user['seniority']}")
-                print(f"    Skills: {', '.join(user['skills'][:5])}...")
+                print(f"  • {user['name']} ({user['email']}) — {user['seniority']}")
+                print(f"    Skills: {', '.join((user['skills'] or [])[:5])}...")
+
+            if report["teams"]:
+                print("\n👥 CREATED TEAMS:")
+                for team in report["teams"]:
+                    print(f"  • {team['name']} @ {team['company']} — {team['members']} members, {team['jobs']} jobs")
 
             print("\n🔐 LOGIN CREDENTIALS:")
             for cred in report["login_credentials"]:
-                print(f"  • {cred['type']}: {cred['email']} / {cred['password']}")
-                if "company" in cred:
-                    print(f"    Company: {cred['company']}")
+                label = cred.get("company", "")
+                company_str = f" [{label}]" if label else ""
+                print(f"  • {cred['type']}{company_str}: {cred['email']} / {cred['password']}")
 
-            print(f"\nAPI Base URL: {args.api_url}")
+            print(f"\nAPI Base URL:      {args.api_url}")
             print(f"API Documentation: {args.api_url}/docs")
 
-            # Save report to file if requested
             if args.output_file:
                 with open(args.output_file, 'w') as f:
                     json.dump(report, f, indent=2, default=str)
                 print(f"\n📄 Report saved to: {args.output_file}")
 
-            print("\n" + "="*80)
-
-        except Exception as e:
-            logger.error(f"❌ Database population failed: {e}")
+        except DatabasePopulationError as e:
+            logger.error(f"❌ Population failed: {e}")
             sys.exit(1)
+        except Exception as e:
+            logger.error(f"❌ Unexpected error: {e}")
+            raise
 
 
 if __name__ == "__main__":

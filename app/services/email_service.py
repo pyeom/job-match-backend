@@ -204,6 +204,69 @@ async def send_password_reset_email(to_email: str, full_name: str, token: str) -
         logger.exception("Failed to send password reset email to %s", to_email)
 
 
+async def send_outcome_request_email(
+    to_email: str,
+    recruiter_name: str,
+    candidate_name: str,
+    job_title: str,
+    outcome_url: str,
+) -> None:
+    """Send an outcome-request email to a recruiter asking for a 90-day hire evaluation.
+
+    If SMTP is not configured the message is logged instead.
+    """
+    if not settings.smtp_host:
+        logger.info(
+            "SMTP not configured — outcome request for recruiter %s candidate %s: %s",
+            to_email,
+            candidate_name,
+            outcome_url,
+        )
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = f"¿Cómo va la incorporación de {candidate_name}?"
+    msg["From"] = settings.smtp_from
+    msg["To"] = to_email
+
+    name = recruiter_name or "there"
+    text_body = (
+        f"Hola {name},\n\n"
+        f"Han pasado 90 días desde que avanzaste a {candidate_name} para el puesto de {job_title}.\n\n"
+        "¿Cómo va la incorporación? Completa su evaluación en 2 minutos:\n\n"
+        f"{outcome_url}\n\n"
+        "— El equipo de Job Match"
+    )
+    html_body = f"""<!DOCTYPE html>
+<html>
+<body style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; color: #333;">
+  <h2 style="color: #5C6BC0;">¿Cómo va la incorporación de {candidate_name}?</h2>
+  <p>Hola {name},</p>
+  <p>Han pasado 90 días desde que avanzaste a <strong>{candidate_name}</strong>
+     para el puesto de <strong>{job_title}</strong>.</p>
+  <p>Completa su evaluación en 2 minutos para ayudarnos a mejorar las recomendaciones:</p>
+  <p style="text-align: center; margin: 32px 0;">
+    <a href="{outcome_url}"
+       style="background-color: #5C6BC0; color: #ffffff; padding: 14px 28px;
+              text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px;">
+      Completar evaluación
+    </a>
+  </p>
+  <hr style="border: none; border-top: 1px solid #eee; margin: 24px 0;">
+  <p style="font-size: 12px; color: #999;">Job Match · Feedback loop</p>
+</body>
+</html>"""
+
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+
+    try:
+        await asyncio.to_thread(_send_smtp, to_email, msg)
+        logger.info("Outcome request email sent to %s for candidate %s", to_email, candidate_name)
+    except Exception:
+        logger.exception("Failed to send outcome request email to %s", to_email)
+
+
 async def send_verification_email(to_email: str, full_name: str, token: str) -> None:
     """Send a verification email asynchronously.
 
@@ -227,3 +290,32 @@ async def send_verification_email(to_email: str, full_name: str, token: str) -> 
         logger.info("Verification email sent to %s", to_email)
     except Exception:
         logger.exception("Failed to send verification email to %s", to_email)
+
+
+async def send_admin_alert_email(subject: str, body: str) -> None:
+    """Send a plain-text alert email to the configured admin address.
+
+    Used by automated tasks (fairness audit, model retraining) to surface
+    actionable issues.  If SMTP is not configured the alert is logged instead.
+    """
+    recipient = settings.admin_alert_email or settings.smtp_from
+    if not recipient:
+        logger.warning("send_admin_alert_email: no recipient configured — logging only")
+        logger.warning("ADMIN ALERT — %s\n%s", subject, body)
+        return
+
+    if not settings.smtp_host:
+        logger.info("SMTP not configured — admin alert: %s\n%s", subject, body)
+        return
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = settings.smtp_from
+    msg["To"] = recipient
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        await asyncio.to_thread(_send_smtp, recipient, msg)
+        logger.info("Admin alert email sent: %s", subject)
+    except Exception:
+        logger.exception("Failed to send admin alert email: %s", subject)

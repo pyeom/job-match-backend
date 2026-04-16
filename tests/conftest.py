@@ -99,6 +99,7 @@ async def engine():
     import app.models.filter_preset # noqa: F401
     import app.models.recent_search # noqa: F401
     import app.models.interaction   # noqa: F401
+    import app.models.mala          # noqa: F401
 
     # Swap JSONB → JSON so SQLite can render the DDL (idempotent)
     _patch_postgres_types_for_sqlite(Base.metadata)

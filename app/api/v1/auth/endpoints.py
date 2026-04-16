@@ -11,12 +11,21 @@ from app.core.security import (
     store_device_session, update_device_session, revoke_device_session,
     revoke_all_user_sessions, get_user_sessions,
 )
-from app.models.user import User, UserRole
+from app.models.user import User, UserRole, CompanyRole
 from app.models.company import Company
+from app.models.pipeline import PipelineTemplate, DEFAULT_PIPELINE_STAGES
 from app.schemas.auth import (
     UserCreate, CompanyUserCreate, UserLogin, Token, LogoutResponse,
     RefreshTokenRequest, TokenRefreshResponse, RefreshTokenLogout,
     DeviceSession, DeviceListResponse, LogoutAllResponse, RevokeDeviceResponse,
+    WorkOSCallbackRequest,
+    WorkOSEmailVerifyRequest,
+    WorkOSEmailVerificationPending,
+)
+from app.services.workos_service import (
+    get_user_from_code,
+    verify_email_and_get_user,
+    WorkOSEmailVerificationRequired,
 )
 from app.schemas.user import User as UserSchema
 from app.api.deps import get_current_user
@@ -165,6 +174,7 @@ async def register_company_user(
     result = await db.execute(select(Company).where(Company.name == user_data.company_name))
     db_company = result.scalar_one_or_none()
 
+    is_new_company = False
     if db_company:
         # Check if company is active
         if not db_company.is_active:
@@ -187,6 +197,20 @@ async def register_company_user(
         db.add(db_company)
         await db.flush()  # Get the company ID
         company_id = db_company.id
+        is_new_company = True
+
+        # Seed default pipeline template for the new company
+        default_template = PipelineTemplate(
+            id=uuid.uuid4(),
+            company_id=company_id,
+            name="Default Pipeline",
+            stages=DEFAULT_PIPELINE_STAGES,
+            is_default=True,
+        )
+        db.add(default_template)
+
+    # First user of a new company gets ADMIN company role; additional users get RECRUITER
+    resolved_company_role = CompanyRole.ADMIN if is_new_company else CompanyRole.RECRUITER
 
     # Create new company user (email_verified defaults to False)
     hashed_password = get_password_hash(user_data.password)
@@ -197,6 +221,7 @@ async def register_company_user(
         full_name=user_data.full_name,
         role=user_data.role,
         company_id=company_id,
+        company_role=resolved_company_role,
         email_verified=False,
     )
 
@@ -233,7 +258,10 @@ async def register_company_user(
     device_name = user_data.device_name or "Unknown Device"
     platform_name = user_data.platform or "unknown"
 
-    access_token = create_access_token(data={"sub": str(db_user.id)})
+    access_token = create_access_token(data={
+        "sub": str(db_user.id),
+        "company_id": str(company_id),
+    })
     refresh_token = create_refresh_token(data={"sub": str(db_user.id), "did": device_id})
 
     token_hash = _get_token_hash(refresh_token)
@@ -241,6 +269,300 @@ async def register_company_user(
     await store_device_session(
         str(db_user.id), device_id, token_hash, expires_at,
         device_name, platform_name,
+    )
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": settings.access_token_expires,
+    }
+
+
+@router.post("/workos/callback", response_model=Token, responses={202: {"model": WorkOSEmailVerificationPending}})
+async def workos_callback(
+    request: Request,
+    body: WorkOSCallbackRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Exchange a WorkOS authorization code for an internal JWT.
+
+    Returns 202 with email_verification_required when WorkOS needs the user
+    to verify their email. The frontend should show a verification code input
+    and POST to /workos/verify-email with the code + pending_authentication_token.
+    """
+    client_ip = request.client.host if request.client else "unknown"
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"workos_callback:ip:{client_ip}",
+        max_requests=20,
+        window_seconds=900,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    try:
+        result = await get_user_from_code(body.code)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+
+    if isinstance(result, WorkOSEmailVerificationRequired):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=202,
+            content=WorkOSEmailVerificationPending(
+                email=result.email,
+                email_verification_id=result.email_verification_id,
+                pending_authentication_token=result.pending_authentication_token,
+            ).model_dump(),
+        )
+
+    workos_user = result
+
+    # Upsert: external_id match → email match → create new
+    db_user = None
+
+    result = await db.execute(select(User).where(User.external_id == workos_user.id))
+    db_user = result.scalar_one_or_none()
+
+    if db_user is None:
+        result = await db.execute(select(User).where(User.email == workos_user.email))
+        db_user = result.scalar_one_or_none()
+        if db_user is not None:
+            db_user.auth_provider = "workos"
+            db_user.external_id = workos_user.id
+            db_user.email_verified = True
+            if workos_user.profile_picture_url and not db_user.avatar_url:
+                db_user.avatar_url = workos_user.profile_picture_url
+
+    if db_user is None:
+        role_str = (body.role or "job_seeker").lower()
+        if role_str in ("company_admin", "admin"):
+            resolved_role = UserRole.COMPANY_ADMIN
+        elif role_str in ("company_recruiter", "recruiter"):
+            resolved_role = UserRole.COMPANY_RECRUITER
+        else:
+            resolved_role = UserRole.JOB_SEEKER
+
+        client_app = request.headers.get("X-Client-App", "").lower()
+        if client_app == "jobseeker" and resolved_role in (
+            UserRole.COMPANY_RECRUITER, UserRole.COMPANY_ADMIN,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        full_name = " ".join(
+            filter(None, [workos_user.first_name, workos_user.last_name])
+        ) or workos_user.email.split("@")[0]
+
+        db_user = User(
+            id=uuid.uuid4(),
+            email=workos_user.email,
+            password_hash=None,
+            auth_provider="workos",
+            external_id=workos_user.id,
+            full_name=full_name,
+            avatar_url=workos_user.profile_picture_url,
+            role=resolved_role,
+            email_verified=True,
+        )
+        db.add(db_user)
+        await db.flush()
+
+        try:
+            profile_embedding = embedding_service.generate_user_embedding(
+                headline=db_user.headline,
+                skills=db_user.skills,
+                preferences=db_user.preferred_locations,
+            )
+            db_user.profile_embedding = profile_embedding
+        except Exception as e:
+            pass
+
+        if resolved_role in (UserRole.COMPANY_ADMIN, UserRole.COMPANY_RECRUITER):
+            if not body.company_name:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="company_name is required when registering a company user.",
+                )
+            result = await db.execute(select(Company).where(Company.name == body.company_name))
+            db_company = result.scalar_one_or_none()
+            is_new_company = db_company is None
+            if not db_company:
+                db_company = Company(
+                    id=uuid.uuid4(),
+                    name=body.company_name,
+                    description=body.company_description,
+                    website=body.company_website,
+                    industry=body.company_industry,
+                    size=body.company_size,
+                    location=body.company_location,
+                )
+                db.add(db_company)
+                await db.flush()
+                default_template = PipelineTemplate(
+                    id=uuid.uuid4(),
+                    company_id=db_company.id,
+                    name="Default Pipeline",
+                    stages=DEFAULT_PIPELINE_STAGES,
+                    is_default=True,
+                )
+                db.add(default_template)
+            db_user.company_id = db_company.id
+            db_user.company_role = CompanyRole.ADMIN if is_new_company else CompanyRole.RECRUITER
+    else:
+        client_app = request.headers.get("X-Client-App", "").lower()
+        if client_app == "jobseeker" and db_user.role in (
+            UserRole.COMPANY_RECRUITER, UserRole.COMPANY_ADMIN,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    await db.commit()
+    await db.refresh(db_user)
+
+    puc_complete = False
+    if db_user.role == UserRole.JOB_SEEKER:
+        try:
+            from app.repositories.puc_repository import PUCRepository
+            puc_repo = PUCRepository(db)
+            profile = await puc_repo.get_by_user_id(db_user.id)
+            puc_complete = (
+                profile is not None and (profile.completeness_score or 0.0) >= 1.0
+            )
+        except Exception:
+            pass
+
+    token_data: dict = {
+        "sub": str(db_user.id),
+        "role": db_user.role.value,
+        "tenant_id": str(db_user.company_id) if db_user.company_id else None,
+        "puc_complete": puc_complete,
+    }
+
+    device_id = str(uuid.uuid4())
+    device_name = body.device_name or "Unknown Device"
+    platform_name = body.platform or "unknown"
+
+    access_token = create_access_token(data=token_data)
+    refresh_token = create_refresh_token(data={"sub": str(db_user.id), "did": device_id})
+
+    token_hash = _get_token_hash(refresh_token)
+    expires_at = get_token_expires_at(refresh_token)
+    await store_device_session(
+        str(db_user.id), device_id, token_hash, expires_at,
+        device_name, platform_name,
+    )
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": settings.access_token_expires,
+    }
+
+
+@router.post("/workos/verify-email", response_model=Token)
+async def workos_verify_email(
+    request: Request,
+    body: WorkOSEmailVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Complete WorkOS social login after email verification."""
+    client_ip = request.client.host if request.client else "unknown"
+    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
+        key=f"workos_callback:ip:{client_ip}",
+        max_requests=20,
+        window_seconds=900,
+    )
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    try:
+        workos_user = await verify_email_and_get_user(body.code, body.pending_authentication_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+
+    result = await db.execute(select(User).where(User.external_id == workos_user.id))
+    db_user = result.scalar_one_or_none()
+
+    if db_user is None:
+        result = await db.execute(select(User).where(User.email == workos_user.email))
+        db_user = result.scalar_one_or_none()
+        if db_user is not None:
+            db_user.auth_provider = "workos"
+            db_user.external_id = workos_user.id
+            db_user.email_verified = True
+
+    if db_user is None:
+        role_str = (body.role or "job_seeker").lower()
+        resolved_role = UserRole.JOB_SEEKER
+        if role_str in ("company_admin", "admin"):
+            resolved_role = UserRole.COMPANY_ADMIN
+        elif role_str in ("company_recruiter", "recruiter"):
+            resolved_role = UserRole.COMPANY_RECRUITER
+
+        full_name = " ".join(
+            filter(None, [workos_user.first_name, workos_user.last_name])
+        ) or workos_user.email.split("@")[0]
+
+        db_user = User(
+            id=uuid.uuid4(),
+            email=workos_user.email,
+            password_hash=None,
+            auth_provider="workos",
+            external_id=workos_user.id,
+            full_name=full_name,
+            avatar_url=workos_user.profile_picture_url,
+            role=resolved_role,
+            email_verified=True,
+        )
+        db.add(db_user)
+        await db.flush()
+
+    await db.commit()
+    await db.refresh(db_user)
+
+    puc_complete = False
+    if db_user.role == UserRole.JOB_SEEKER:
+        try:
+            from app.repositories.puc_repository import PUCRepository
+            puc_repo = PUCRepository(db)
+            profile = await puc_repo.get_by_user_id(db_user.id)
+            puc_complete = profile is not None and (profile.completeness_score or 0.0) >= 1.0
+        except Exception:
+            pass
+
+    token_data: dict = {
+        "sub": str(db_user.id),
+        "role": db_user.role.value,
+        "tenant_id": str(db_user.company_id) if db_user.company_id else None,
+        "puc_complete": puc_complete,
+    }
+
+    device_id = str(uuid.uuid4())
+    access_token = create_access_token(data=token_data)
+    refresh_token = create_refresh_token(data={"sub": str(db_user.id), "did": device_id})
+
+    token_hash = _get_token_hash(refresh_token)
+    expires_at = get_token_expires_at(refresh_token)
+    await store_device_session(
+        str(db_user.id), device_id, token_hash, expires_at,
+        body.device_name or "Unknown Device",
+        body.platform or "unknown",
     )
 
     return {
@@ -289,6 +611,16 @@ async def login(
     result = await db.execute(select(User).where(User.email == user_credentials.email))
     user = result.scalar_one_or_none()
 
+    # Block WorkOS-only accounts from password login
+    if user and user.auth_provider == "workos" and not user.password_hash:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "This account uses social sign-in. "
+                "Please sign in with the social provider you used to register."
+            ),
+        )
+
     password_valid = user and verify_password(user_credentials.password, user.password_hash)
     if not password_valid and user:
         # Migration path: try the legacy truncation method for pre-existing hashes
@@ -304,12 +636,31 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # Reject company accounts from the job-seeker app.
+    # The header X-Client-App: jobseeker is sent by the job-seeker frontend on
+    # every request. Company users must authenticate through the company portal
+    # (<company>.job-match.cl), not through this app.
+    client_app = request.headers.get("X-Client-App", "").lower()
+    if client_app == "jobseeker" and user.role in (
+        UserRole.COMPANY_RECRUITER,
+        UserRole.COMPANY_ADMIN,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     # Create tokens with device session tracking
     device_id = str(uuid.uuid4())
     device_name = user_credentials.device_name or "Unknown Device"
     platform_name = user_credentials.platform or "unknown"
 
-    access_token = create_access_token(data={"sub": str(user.id)})
+    token_data: dict = {"sub": str(user.id)}
+    if user.role in (UserRole.COMPANY_RECRUITER, UserRole.COMPANY_ADMIN) and user.company_id:
+        token_data["company_id"] = str(user.company_id)
+
+    access_token = create_access_token(data=token_data)
     refresh_token = create_refresh_token(data={"sub": str(user.id), "did": device_id})
 
     token_hash = _get_token_hash(refresh_token)
@@ -408,7 +759,11 @@ async def refresh_access_token(
     if device_id:
         token_data["did"] = device_id
 
-    access_token = create_access_token(data={"sub": str(user.id)})
+    access_token_data: dict = {"sub": str(user.id)}
+    if user.role in (UserRole.COMPANY_RECRUITER, UserRole.COMPANY_ADMIN) and user.company_id:
+        access_token_data["company_id"] = str(user.company_id)
+
+    access_token = create_access_token(data=access_token_data)
     new_refresh_token = create_refresh_token(data=token_data)
 
     # Update device session with new token hash

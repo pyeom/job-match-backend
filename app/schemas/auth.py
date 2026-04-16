@@ -139,3 +139,32 @@ class LogoutAllResponse(BaseModel):
 
 class RevokeDeviceResponse(BaseModel):
     message: str
+
+
+class WorkOSEmailVerificationPending(BaseModel):
+    """Returned with HTTP 202 when WorkOS requires email verification."""
+    status: str = "email_verification_required"
+    email: str
+    email_verification_id: str
+    pending_authentication_token: str
+
+
+class WorkOSEmailVerifyRequest(BaseModel):
+    code: str
+    pending_authentication_token: str
+    role: Optional[str] = "job_seeker"
+    device_name: Optional[str] = None
+    platform: Optional[str] = None
+
+
+class WorkOSCallbackRequest(BaseModel):
+    code: str
+    role: Optional[str] = "job_seeker"
+    company_name: Optional[str] = None
+    company_description: Optional[str] = None
+    company_website: Optional[str] = None
+    company_industry: Optional[str] = None
+    company_size: Optional[str] = None
+    company_location: Optional[str] = None
+    device_name: Optional[str] = None
+    platform: Optional[str] = None

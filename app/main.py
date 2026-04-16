@@ -21,6 +21,10 @@ configure_logging(app_env=settings.app_env)
 settings.log_config()
 from app.api.v1 import auth, jobs, swipes, applications, users, companies, notifications, filters
 from app.api.v1 import websocket, media, documents, ai
+from app.api.v1 import teams, pipeline
+from app.api.v1.mala import router as mala_router
+from app.api.v1.hiring_outcomes import router as hiring_outcomes_router
+from app.api.v1.admin import router as admin_router
 from app.core.database import engine
 from app.core.cache import get_redis, close_redis_pool
 from app.services.embedding_service import embedding_service
@@ -146,6 +150,7 @@ app.add_middleware(
         "X-Request-ID",
         "X-CSRF-Token",
         "ngrok-skip-browser-warning",  # injected by api.ts when backend URL is a ngrok tunnel
+        "X-Client-App",               # identifies the calling app (e.g. "jobseeker")
     ],
     expose_headers=["X-Request-ID"],
 )
@@ -257,6 +262,11 @@ app.include_router(websocket.router, tags=["WebSocket"])
 app.include_router(media.router, prefix="/api/v1/media", tags=["Media"])
 # AI-powered features (match explanations, insights)
 app.include_router(ai.router, prefix="/api/v1/ai", tags=["AI Features"])
+app.include_router(teams.router, prefix="/api/v1", tags=["Teams"])
+app.include_router(pipeline.router, prefix="/api/v1", tags=["Pipeline"])
+app.include_router(mala_router.router, prefix="/api/v1/mala", tags=["MALA Assessment"])
+app.include_router(hiring_outcomes_router, prefix="/api/v1", tags=["Hiring Outcomes"])
+app.include_router(admin_router, prefix="/api/v1", tags=["Admin"])
 
 
 @app.get("/api/v1/csrf-token", tags=["Security"])
