@@ -324,6 +324,7 @@ async def workos_callback(
 
     # Upsert: external_id match → email match → create new
     db_user = None
+    is_new_user = False
 
     result = await db.execute(select(User).where(User.external_id == workos_user.id))
     db_user = result.scalar_one_or_none()
@@ -339,6 +340,7 @@ async def workos_callback(
                 db_user.avatar_url = workos_user.profile_picture_url
 
     if db_user is None:
+        is_new_user = True
         role_str = (body.role or "job_seeker").lower()
         if role_str in ("company_admin", "admin"):
             resolved_role = UserRole.COMPANY_ADMIN
@@ -468,6 +470,7 @@ async def workos_callback(
         "refresh_token": refresh_token,
         "token_type": "bearer",
         "expires_in": settings.access_token_expires,
+        "is_new_user": is_new_user,
     }
 
 
@@ -498,6 +501,7 @@ async def workos_verify_email(
 
     result = await db.execute(select(User).where(User.external_id == workos_user.id))
     db_user = result.scalar_one_or_none()
+    is_new_user = False
 
     if db_user is None:
         result = await db.execute(select(User).where(User.email == workos_user.email))
@@ -508,6 +512,7 @@ async def workos_verify_email(
             db_user.email_verified = True
 
     if db_user is None:
+        is_new_user = True
         role_str = (body.role or "job_seeker").lower()
         resolved_role = UserRole.JOB_SEEKER
         if role_str in ("company_admin", "admin"):
@@ -570,6 +575,7 @@ async def workos_verify_email(
         "refresh_token": refresh_token,
         "token_type": "bearer",
         "expires_in": settings.access_token_expires,
+        "is_new_user": is_new_user,
     }
 
 

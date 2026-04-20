@@ -9,6 +9,7 @@ class Token(BaseModel):
     refresh_token: str
     token_type: str = "bearer"
     expires_in: int
+    is_new_user: bool = False
 
 
 class TokenData(BaseModel):
