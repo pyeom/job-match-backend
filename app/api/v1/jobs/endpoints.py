@@ -18,6 +18,7 @@ from app.schemas.job import Job as JobSchema, JobWithCompany, DiscoverResponse
 from app.schemas.search import JobSearchRequest, JobSearchResponse
 from app.services.search_service import search_service
 from app.services.rate_limit_service import rate_limit_service
+from app.core.config import settings, parse_rate_limit
 import uuid
 import base64
 import json
@@ -71,11 +72,12 @@ async def discover_jobs(
     factors).  A PostgreSQL fallback is used when ES is unavailable or the
     user has no profile embedding.
     """
-    # Rate limit: 30 discover requests per minute per user
+    # Rate limit: configurable via settings.rate_limit_discover (default 30/minute)
+    _rl_disc_max, _rl_disc_window = parse_rate_limit(settings.rate_limit_discover)
     is_allowed, retry_after = await rate_limit_service.check_rate_limit(
         key=f"discover:user:{current_user.id}",
-        max_requests=30,
-        window_seconds=60,
+        max_requests=_rl_disc_max,
+        window_seconds=_rl_disc_window,
     )
     if not is_allowed:
         raise HTTPException(

@@ -121,6 +121,61 @@ class RateLimitService:
             # In dev/test, fail open so development is not blocked
             return True, 0
 
+    async def peek_rate_limit(
+        self,
+        key: str,
+        max_requests: int,
+        window_seconds: int,
+    ) -> Tuple[bool, int]:
+        """Check current count without recording a new attempt."""
+        resolved_key = f"ratelimit:{key}"
+        try:
+            from app.core.cache import get_redis
+
+            r = await get_redis()
+            now = time.time()
+            window_start = now - window_seconds
+
+            pipe = r.pipeline()
+            pipe.zremrangebyscore(resolved_key, 0, window_start)
+            pipe.zcard(resolved_key)
+            results = await pipe.execute()
+
+            count: int = results[1]
+            if count >= max_requests:
+                oldest = await r.zrange(resolved_key, 0, 0, withscores=True)
+                if oldest:
+                    retry_after = int(window_seconds - (now - oldest[0][1]))
+                    retry_after = max(retry_after, 1)
+                else:
+                    retry_after = window_seconds
+                return False, retry_after
+
+            return True, 0
+
+        except Exception:
+            logger.error("Rate limit peek failed for key '%s'", key, exc_info=True)
+            from app.core.config import settings
+
+            if settings.app_env == "production":
+                return False, 60
+            return True, 0
+
+    async def record_attempt(self, key: str, window_seconds: int) -> None:
+        """Record a failed attempt without checking the limit."""
+        resolved_key = f"ratelimit:{key}"
+        try:
+            from app.core.cache import get_redis
+
+            r = await get_redis()
+            now = time.time()
+            pipe = r.pipeline()
+            pipe.zadd(resolved_key, {f"{now}:{time.monotonic_ns()}": now})
+            pipe.expire(resolved_key, window_seconds)
+            await pipe.execute()
+        except Exception:
+            logger.error("Rate limit record failed for key '%s'", key, exc_info=True)
+
     # ── Legacy synchronous stubs (backward compatibility) ─────────────────────
 
     def record_request(self, user_id: uuid.UUID) -> None:

@@ -33,6 +33,7 @@ from app.repositories.match_score_repository import MatchScoreRepository
 from app.repositories.puc_profile_repository import PUCProfileRepository
 from app.repositories.job_match_config_repository import JobMatchConfigRepository
 from app.repositories.company_org_profile_repository import CompanyOrgProfileRepository
+from app.core.config import settings
 from app.schemas.match_score import (
     HardMatchDetail,
     InsightItem,
@@ -824,9 +825,11 @@ async def compute_final_score(
     confidence_multiplier = max(0.3, min(1.0, completeness))
 
     # --- 7. Weighted total and effective score ---
-    w_hard = job_config.weight_hard or 0.50
-    w_soft = job_config.weight_soft or 0.30
-    w_pred = job_config.weight_predictive or 0.20
+    # Fall back to system-level defaults from settings when the job has no config.
+    # WHY: weights derived from recruiter validation study (Q1 2026) — see config.py.
+    w_hard = job_config.weight_hard or settings.match_score_w_hard
+    w_soft = job_config.weight_soft or settings.match_score_w_soft
+    w_pred = job_config.weight_predictive or settings.match_score_w_predictive
 
     total_score = (
         hard_detail.score * w_hard

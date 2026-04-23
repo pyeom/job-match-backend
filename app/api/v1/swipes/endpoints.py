@@ -29,6 +29,9 @@ from app.core.cache import (
     remove_from_swiped_set,
 )
 from app.services.scoring_service import ScoringService
+from app.repositories.swipe_repository import SwipeRepository
+from app.repositories.application_repository import ApplicationRepository
+from app.core.config import settings, parse_rate_limit
 import base64
 import json
 from datetime import datetime, timedelta, timezone
@@ -37,6 +40,9 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_swipe_repo = SwipeRepository()
+_application_repo = ApplicationRepository()
 
 
 @router.post("", response_model=SwipeSchema)
@@ -48,11 +54,12 @@ async def create_swipe(
 ):
     """Create a new swipe (and application if RIGHT)"""
 
-    # Rate limit: 120 swipes per minute per user (allows fast swiping)
+    # Rate limit: configurable via settings.rate_limit_swipes (default 120/minute)
+    _rl_sw_max, _rl_sw_window = parse_rate_limit(settings.rate_limit_swipes)
     is_allowed, retry_after = await rate_limit_service.check_rate_limit(
         key=f"swipe:user:{current_user.id}",
-        max_requests=120,
-        window_seconds=60,
+        max_requests=_rl_sw_max,
+        window_seconds=_rl_sw_window,
     )
     if not is_allowed:
         raise HTTPException(
@@ -61,8 +68,12 @@ async def create_swipe(
             headers={"Retry-After": str(retry_after)},
         )
 
-    # Validate job exists
-    result = await db.execute(select(Job).where(Job.id == swipe_data.job_id, Job.is_active == True))
+    # Validate job exists — eager-load company to avoid N+1 queries in downstream access
+    result = await db.execute(
+        select(Job)
+        .options(selectinload(Job.company))
+        .where(Job.id == swipe_data.job_id, Job.is_active == True)
+    )
     job = result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -72,11 +83,9 @@ async def create_swipe(
         raise HTTPException(status_code=400, detail="Direction must be LEFT or RIGHT")
 
     # Check if any swipe exists for this (user, job) — active or previously undone
-    result = await db.execute(select(Swipe).where(
-        Swipe.user_id == current_user.id,
-        Swipe.job_id == swipe_data.job_id,
-    ))
-    existing_swipe = result.scalar_one_or_none()
+    existing_swipe = await _swipe_repo.get_any_swipe_on_job(
+        db, current_user.id, swipe_data.job_id
+    )
 
     application = None
 
@@ -100,11 +109,9 @@ async def create_swipe(
 
     # If RIGHT swipe, stage application in the same transaction
     if swipe_data.direction == "RIGHT":
-        result = await db.execute(select(Application).where(
-            Application.user_id == current_user.id,
-            Application.job_id == swipe_data.job_id
-        ))
-        existing_application = result.scalar_one_or_none()
+        existing_application = await _application_repo.get_by_user_and_job(
+            db, current_user.id, swipe_data.job_id
+        )
 
         if not existing_application:
             score = ScoringService.calculate_job_score(
@@ -167,14 +174,7 @@ async def create_swipe(
 
 async def _should_update_embedding(user_id, db) -> bool:
     """Return True when the right-swipe count crosses the update threshold."""
-    result = await db.execute(
-        select(func.count(Swipe.id)).where(
-            Swipe.user_id == user_id,
-            Swipe.direction == "RIGHT",
-            Swipe.is_undone == False,
-        )
-    )
-    count = result.scalar() or 0
+    count = await _swipe_repo.get_right_swipes_count(db, user_id)
     return count == 5 or (count > 5 and (count - 5) % 3 == 0)
 
 

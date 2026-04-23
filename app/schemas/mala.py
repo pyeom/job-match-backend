@@ -74,3 +74,35 @@ class MalaResponseSubmitResult(BaseModel):
     processing_job_id: str
     next_question_code: Optional[str] = None
     progress: MalaProgressSchema
+
+
+# ── Archetype endpoint schemas ─────────────────────────────────────────────────
+
+class ArchetypeDataSchema(BaseModel):
+    """Non-translatable visual metadata for an archetype.
+
+    Display strings (name, strengths, risks, ideal_cultures, matching_note)
+    are resolved client-side via i18n keys ``archetypes.<id>.*``.
+    """
+
+    emoji: str
+    color: str
+
+
+class BigFiveSchema(BaseModel):
+    openness: float
+    conscientiousness: float
+    extraversion: float
+    agreeableness: float
+    emotional_stability: float
+
+
+class ArchetypeResponseSchema(BaseModel):
+    primary_archetype: str
+    probabilities: dict[str, float]
+    is_hybrid: bool
+    hybrid_description: Optional[str] = None
+    stability_warning: bool
+    archetype_data: ArchetypeDataSchema
+    big_five: Optional[BigFiveSchema] = None
+    completeness_score: float

@@ -72,11 +72,31 @@ class Settings(BaseSettings):
     # CDN base URL — when set, media URLs point here instead of the API
     media_cdn_url: Optional[str] = Field(default=None, env="MEDIA_CDN_URL")
 
-    # Anthropic API — optional; if absent, InsightsService falls back to templates
-    anthropic_api_key: Optional[str] = Field(default=None, env="ANTHROPIC_API_KEY")
+    # DashScope (Qwen) API — optional; if absent, InsightsService falls back to templates
+    dashscope_api_key: Optional[str] = Field(default=None, env="DASHSCOPE_API_KEY")
+    qwen_model: str = Field(default="qwen-plus", env="QWEN_MODEL")
 
     workos_api_key: Optional[str] = Field(default=None, env="WORKOS_API_KEY")
     workos_client_id: Optional[str] = Field(default=None, env="WORKOS_CLIENT_ID")
+
+    # Match score weights — must collectively drive the final_score formula.
+    # WHY: derived from initial recruiter validation study (Q1 2026).
+    # The job-level JobMatchConfig weights override these for individual jobs;
+    # these are the system-wide defaults used when no config is present.
+    match_score_w_hard: float = Field(default=0.55, env="MATCH_SCORE_W_HARD", description="Hard skills match weight")
+    match_score_w_soft: float = Field(default=0.20, env="MATCH_SCORE_W_SOFT", description="Soft/Big Five match weight")
+    match_score_w_predictive: float = Field(default=0.10, env="MATCH_SCORE_W_PREDICTIVE", description="Predictive model weight")
+
+    # Rate limits — format: "<max_requests>/<window>" where window is a number of seconds
+    # or a human-readable unit (minute, hour).  Values are parsed at call-site via
+    # parse_rate_limit() in app/core/config.py.
+    # WHY: centralised so ops can tune limits via env vars without a redeploy.
+    rate_limit_register: str = Field(default="10/hour", env="RATE_LIMIT_REGISTER")
+    rate_limit_login_email: str = Field(default="5/15minute", env="RATE_LIMIT_LOGIN_EMAIL")
+    rate_limit_login_ip: str = Field(default="20/15minute", env="RATE_LIMIT_LOGIN_IP")
+    rate_limit_swipes: str = Field(default="120/minute", env="RATE_LIMIT_SWIPES")
+    rate_limit_discover: str = Field(default="30/minute", env="RATE_LIMIT_DISCOVER")
+    rate_limit_global: str = Field(default="300/minute", env="RATE_LIMIT_GLOBAL")
 
     @property
     def use_s3(self) -> bool:
@@ -171,3 +191,45 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def parse_rate_limit(value: str) -> tuple[int, int]:
+    """Parse a rate limit string into (max_requests, window_seconds).
+
+    Supported formats:
+        "10/hour"        -> (10, 3600)
+        "5/15minute"     -> (5, 900)
+        "120/minute"     -> (120, 60)
+        "300/minute"     -> (300, 60)
+
+    Args:
+        value: Rate limit string in the form "<count>/<multiplier><unit>".
+
+    Returns:
+        Tuple of (max_requests, window_seconds).
+
+    Raises:
+        ValueError: If the format is not recognised.
+    """
+    import re
+
+    match = re.fullmatch(r"(\d+)/(\d*)(\w+)", value.strip())
+    if not match:
+        raise ValueError(f"Invalid rate limit format: {value!r}")
+
+    count = int(match.group(1))
+    multiplier = int(match.group(2)) if match.group(2) else 1
+    unit = match.group(3).lower()
+
+    unit_seconds: dict[str, int] = {
+        "second": 1,
+        "seconds": 1,
+        "minute": 60,
+        "minutes": 60,
+        "hour": 3600,
+        "hours": 3600,
+    }
+    if unit not in unit_seconds:
+        raise ValueError(f"Unknown time unit {unit!r} in rate limit {value!r}")
+
+    return count, multiplier * unit_seconds[unit]

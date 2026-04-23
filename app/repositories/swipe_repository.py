@@ -301,6 +301,39 @@ class SwipeRepository(BaseRepository[Swipe]):
             logger.error(f"Error fetching active swipe for user {user_id} on job {job_id}: {e}")
             raise
 
+    async def get_any_swipe_on_job(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        job_id: UUID,
+    ) -> Optional[Swipe]:
+        """Return any swipe (including undone ones) for a user/job pair.
+
+        Used when creating a swipe to detect an existing record that can be
+        reused (reset) rather than creating a duplicate row.
+
+        Args:
+            db: Active database session
+            user_id: UUID of the user
+            job_id: UUID of the job
+
+        Returns:
+            Swipe instance (active or undone) if exists, None otherwise
+        """
+        try:
+            stmt = select(Swipe).where(
+                Swipe.user_id == user_id,
+                Swipe.job_id == job_id,
+            )
+            result = await db.execute(stmt)
+            return result.scalar_one_or_none()
+        except SQLAlchemyError as e:
+            logger.error(
+                "Error fetching any swipe for user %s on job %s: %s",
+                user_id, job_id, e,
+            )
+            raise
+
     async def get_right_swipes_count(
         self,
         db: AsyncSession,

@@ -1,9 +1,13 @@
+import logging
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.database import get_db
+
+logger = logging.getLogger(__name__)
 from app.core.security import (
-    verify_password, verify_password_legacy, get_password_hash,
+    verify_password, get_password_hash,
     create_access_token, create_refresh_token,
     verify_token, blacklist_token, is_token_expired, get_token_expiration,
     invalidate_user_tokens,
@@ -41,7 +45,7 @@ from app.services.email_service import (
     send_password_reset_email,
 )
 import uuid
-from app.core.config import settings
+from app.core.config import settings, parse_rate_limit
 
 router = APIRouter()
 
@@ -54,12 +58,13 @@ async def register(
     db: AsyncSession = Depends(get_db),
 ):
     """Register a new job seeker user"""
-    # Rate limit: 10 registrations per IP per hour
+    # Rate limit: configurable via settings.rate_limit_register (default 10/hour)
+    _rl_reg_max, _rl_reg_window = parse_rate_limit(settings.rate_limit_register)
     client_ip = request.client.host if request.client else "unknown"
     is_allowed, retry_after = await rate_limit_service.check_rate_limit(
         key=f"register:ip:{client_ip}",
-        max_requests=10,
-        window_seconds=3600,
+        max_requests=_rl_reg_max,
+        window_seconds=_rl_reg_window,
     )
     if not is_allowed:
         raise HTTPException(
@@ -101,7 +106,7 @@ async def register(
         db_user.profile_embedding = profile_embedding
     except Exception as e:
         # Log error but don't fail registration
-        print(f"Failed to generate profile embedding for user {db_user.id}: {e}")
+        logger.error("Failed to generate profile embedding for user %s", db_user.id, exc_info=True)
 
     await db.commit()
     await db.refresh(db_user)
@@ -121,7 +126,12 @@ async def register(
     device_name = user_data.device_name or "Unknown Device"
     platform_name = user_data.platform or "unknown"
 
-    access_token = create_access_token(data={"sub": str(db_user.id)})
+    access_token = create_access_token(data={
+        "sub": str(db_user.id),
+        "role": db_user.role.value,
+        "tenant_id": None,
+        "puc_complete": False,
+    })
     refresh_token = create_refresh_token(data={"sub": str(db_user.id), "did": device_id})
 
     token_hash = _get_token_hash(refresh_token)
@@ -147,12 +157,13 @@ async def register_company_user(
     db: AsyncSession = Depends(get_db),
 ):
     """Register a new company user with associated company"""
-    # Rate limit: 10 registrations per IP per hour (shared bucket with /register)
+    # Rate limit: configurable via settings.rate_limit_register (shared bucket with /register)
+    _rl_reg_max, _rl_reg_window = parse_rate_limit(settings.rate_limit_register)
     client_ip = request.client.host if request.client else "unknown"
     is_allowed, retry_after = await rate_limit_service.check_rate_limit(
         key=f"register:ip:{client_ip}",
-        max_requests=10,
-        window_seconds=3600,
+        max_requests=_rl_reg_max,
+        window_seconds=_rl_reg_window,
     )
     if not is_allowed:
         raise HTTPException(
@@ -238,7 +249,7 @@ async def register_company_user(
         db_user.profile_embedding = profile_embedding
     except Exception as e:
         # Log error but don't fail registration
-        print(f"Failed to generate profile embedding for user {db_user.id}: {e}")
+        logger.error("Failed to generate profile embedding for user %s", db_user.id, exc_info=True)
 
     await db.commit()
     await db.refresh(db_user)
@@ -260,7 +271,9 @@ async def register_company_user(
 
     access_token = create_access_token(data={
         "sub": str(db_user.id),
-        "company_id": str(company_id),
+        "role": db_user.role.value,
+        "tenant_id": str(company_id),
+        "puc_complete": False,
     })
     refresh_token = create_refresh_token(data={"sub": str(db_user.id), "did": device_id})
 
@@ -442,7 +455,7 @@ async def workos_callback(
                 profile is not None and (profile.completeness_score or 0.0) >= 1.0
             )
         except Exception:
-            pass
+            logger.warning("Failed to fetch PUC profile for token payload, defaulting to incomplete", exc_info=True)
 
     token_data: dict = {
         "sub": str(db_user.id),
@@ -549,7 +562,7 @@ async def workos_verify_email(
             profile = await puc_repo.get_by_user_id(db_user.id)
             puc_complete = profile is not None and (profile.completeness_score or 0.0) >= 1.0
         except Exception:
-            pass
+            logger.warning("Failed to fetch PUC profile for token payload, defaulting to incomplete", exc_info=True)
 
     token_data: dict = {
         "sub": str(db_user.id),
@@ -586,11 +599,17 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ):
     """Authenticate user and return tokens"""
-    # Rate limit: 5 attempts per email per 15 minutes
-    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
-        key=f"login:email:{user_credentials.email.lower()}",
-        max_requests=5,
-        window_seconds=900,
+    _rl_email_max, _rl_email_window = parse_rate_limit(settings.rate_limit_login_email)
+    _rl_ip_max, _rl_ip_window = parse_rate_limit(settings.rate_limit_login_ip)
+    client_ip = request.client.host if request.client else "unknown"
+    email_key = f"login:email:{user_credentials.email.lower()}"
+    ip_key = f"login:ip:{client_ip}"
+
+    # Check limits before attempting auth (peek — does not increment)
+    is_allowed, retry_after = await rate_limit_service.peek_rate_limit(
+        key=email_key,
+        max_requests=_rl_email_max,
+        window_seconds=_rl_email_window,
     )
     if not is_allowed:
         raise HTTPException(
@@ -599,12 +618,10 @@ async def login(
             headers={"Retry-After": str(retry_after)},
         )
 
-    # Rate limit: 20 attempts per IP per 15 minutes
-    client_ip = request.client.host if request.client else "unknown"
-    is_allowed, retry_after = await rate_limit_service.check_rate_limit(
-        key=f"login:ip:{client_ip}",
-        max_requests=20,
-        window_seconds=900,
+    is_allowed, retry_after = await rate_limit_service.peek_rate_limit(
+        key=ip_key,
+        max_requests=_rl_ip_max,
+        window_seconds=_rl_ip_window,
     )
     if not is_allowed:
         raise HTTPException(
@@ -628,14 +645,11 @@ async def login(
         )
 
     password_valid = user and verify_password(user_credentials.password, user.password_hash)
-    if not password_valid and user:
-        # Migration path: try the legacy truncation method for pre-existing hashes
-        if verify_password_legacy(user_credentials.password, user.password_hash):
-            user.password_hash = get_password_hash(user_credentials.password)
-            await db.commit()
-            password_valid = True
 
     if not user or not password_valid:
+        # Only failed attempts count toward the limit
+        await rate_limit_service.record_attempt(email_key, _rl_email_window)
+        await rate_limit_service.record_attempt(ip_key, _rl_ip_window)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -662,9 +676,12 @@ async def login(
     device_name = user_credentials.device_name or "Unknown Device"
     platform_name = user_credentials.platform or "unknown"
 
-    token_data: dict = {"sub": str(user.id)}
-    if user.role in (UserRole.COMPANY_RECRUITER, UserRole.COMPANY_ADMIN) and user.company_id:
-        token_data["company_id"] = str(user.company_id)
+    token_data: dict = {
+        "sub": str(user.id),
+        "role": user.role.value,
+        "tenant_id": str(user.company_id) if user.company_id else None,
+        "puc_complete": False,
+    }
 
     access_token = create_access_token(data=token_data)
     refresh_token = create_refresh_token(data={"sub": str(user.id), "did": device_id})
@@ -765,9 +782,12 @@ async def refresh_access_token(
     if device_id:
         token_data["did"] = device_id
 
-    access_token_data: dict = {"sub": str(user.id)}
-    if user.role in (UserRole.COMPANY_RECRUITER, UserRole.COMPANY_ADMIN) and user.company_id:
-        access_token_data["company_id"] = str(user.company_id)
+    access_token_data: dict = {
+        "sub": str(user.id),
+        "role": user.role.value,
+        "tenant_id": str(user.company_id) if user.company_id else None,
+        "puc_complete": False,
+    }
 
     access_token = create_access_token(data=access_token_data)
     new_refresh_token = create_refresh_token(data=token_data)

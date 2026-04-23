@@ -60,8 +60,8 @@ python-docx>=1.1.0
 python-magic>=0.4.27
 clamd>=1.0.2
 
-# Anthropic Claude API (used by InsightsService for LLM explanations)
-anthropic>=0.37.0
+# Qwen-Plus via DashScope OpenAI-compatible API (used by InsightsService for LLM explanations)
+openai>=1.30.0
 
 # NLP and Resume Parsing
 spacy>=3.7.0

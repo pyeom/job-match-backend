@@ -4,9 +4,12 @@ Resume Parser Coordinator — orchestrates the full AI-powered parsing pipeline.
 Pipeline:
 1. TextCleaner: normalize raw text
 2. SpacyNerPipeline: detect language, sections, extract entities
-3. EscoSkillMatcher: semantic skill matching against ESCO taxonomy
-4. LanguageProficiencyDetector: CEFR-level language detection
-5. Assemble final ResumeParseResponse
+3. LLMResumeExtractor: Qwen/DashScope structural extraction (optional — skipped when
+   DASHSCOPE_API_KEY is absent or the call fails)
+4. EscoSkillMatcher: semantic skill matching against ESCO taxonomy
+5. LanguageProficiencyDetector: CEFR-level language detection
+6. Assemble final ResumeParseResponse (LLM wins for structure, ESCO wins for skill
+   normalization)
 
 Public API: parse_resume(resume_text, document_id) -> ResumeParseResponse
 """
@@ -45,6 +48,7 @@ class ResumeParserCoordinator:
         self._ner_pipeline = None
         self._skill_matcher = None
         self._lang_detector = None
+        self._llm_extractor = None
 
     def _ensure_initialized(self):
         """Lazy-initialize all sub-components on first use."""
@@ -55,11 +59,13 @@ class ResumeParserCoordinator:
         from app.services.resume_parser.spacy_ner_pipeline import SpacyNerPipeline
         from app.services.resume_parser.esco_skill_matcher import EscoSkillMatcher
         from app.services.resume_parser.language_proficiency import LanguageProficiencyDetector
+        from app.services.resume_parser.llm_extractor import LLMResumeExtractor
 
         self._text_cleaner = TextCleaner()
         self._ner_pipeline = SpacyNerPipeline()
         self._skill_matcher = EscoSkillMatcher()
         self._lang_detector = LanguageProficiencyDetector()
+        self._llm_extractor = LLMResumeExtractor()
 
     def parse_resume(
         self,
@@ -131,7 +137,71 @@ class ResumeParserCoordinator:
         # 8. Extract education
         education = self._ner_pipeline.extract_education(doc, sections)
 
-        # 9. Match skills using ESCO
+        # --- LLM extraction (optional) -----------------------------------
+        # Run Qwen after SpaCy has already gathered its view, so we can
+        # merge the two.  Returns None when the API key is absent or the
+        # call fails — pipeline continues unchanged in that case.
+        llm_result = self._llm_extractor.extract(cleaned_text, sections=sections, language=language)
+        parsing_method = "spacy_esco"
+
+        if llm_result is not None:
+            parsing_method = "spacy_esco_llm"
+
+            # Merge contact: LLM values win where non-empty, SpaCy is fallback
+            contact = ParsedContact(
+                full_name=llm_result.contact.get("full_name") or contact.full_name,
+                email=llm_result.contact.get("email") or contact.email,
+                phone=llm_result.contact.get("phone") or contact.phone,
+                linkedin=llm_result.contact.get("linkedin") or contact.linkedin,
+                github=llm_result.contact.get("github") or contact.github,
+                location=llm_result.contact.get("location") or contact.location,
+                portfolio=contact.portfolio,  # LLM prompt does not extract portfolio
+            )
+
+            # Merge summary: prefer LLM (it understands free-form prose better)
+            if llm_result.summary or llm_result.headline:
+                summary = ParsedSummary(
+                    summary=llm_result.summary or summary.summary,
+                    headline=llm_result.headline or summary.headline,
+                )
+
+            # Merge experience: prefer LLM list when it returned at least one entry
+            if llm_result.experience:
+                experience = [
+                    ParsedExperience(
+                        title=exp["title"],
+                        company=exp["company"],
+                        start_date=exp.get("start_date"),
+                        end_date=exp.get("end_date"),
+                        is_current=bool(exp.get("is_current", False)),
+                        description=exp.get("description"),
+                    )
+                    for exp in llm_result.experience
+                ]
+
+            # Merge education: prefer LLM list when it returned at least one entry
+            if llm_result.education:
+                education = [
+                    ParsedEducation(
+                        degree=edu["degree"],
+                        institution=edu["institution"],
+                        field_of_study=edu.get("field_of_study"),
+                        start_date=edu.get("start_date"),
+                        end_date=edu.get("end_date"),
+                        gpa=edu.get("gpa"),
+                    )
+                    for edu in llm_result.education
+                ]
+
+            logger.debug(
+                "LLM extractor returned %d experiences, %d educations, %d raw skills for %s",
+                len(llm_result.experience),
+                len(llm_result.education),
+                len(llm_result.skills),
+                document_id,
+            )
+
+        # 9. Match skills using ESCO (always runs on the full text)
         noun_chunks = self._ner_pipeline.get_noun_chunks(doc)
         skill_items = self._ner_pipeline.get_skill_section_items(sections)
         skills = self._skill_matcher.match_skills(
@@ -158,7 +228,26 @@ class ResumeParserCoordinator:
             all_skills=skills.all_skills,
         )
 
-        # 12. Calculate confidence score
+        # 12. Augment skills with any raw LLM skill strings not already in ESCO results
+        if llm_result is not None and llm_result.skills:
+            existing_lower = {s.lower() for s in skills.all_skills}
+            llm_only: List[str] = []
+            for raw_skill in llm_result.skills:
+                if raw_skill.lower() not in existing_lower:
+                    llm_only.append(raw_skill)
+                    existing_lower.add(raw_skill.lower())
+
+            if llm_only:
+                skills = ParsedSkills(
+                    technical_skills=skills.technical_skills + llm_only,
+                    soft_skills=skills.soft_skills,
+                    languages=skills.languages,
+                    language_proficiencies=skills.language_proficiencies,
+                    certifications=skills.certifications,
+                    all_skills=skills.all_skills + llm_only,
+                )
+
+        # 13. Calculate confidence score
         confidence = self._calculate_confidence(
             contact, summary, experience, education, skills
         )
@@ -168,7 +257,7 @@ class ResumeParserCoordinator:
             f"lang={language}, sections={sections_found}, "
             f"experience={len(experience)}, education={len(education)}, "
             f"skills={len(skills.all_skills)}, languages={len(languages_list)}, "
-            f"confidence={confidence:.2f}"
+            f"confidence={confidence:.2f}, method={parsing_method}"
         )
 
         return ResumeParseResponse(
@@ -179,7 +268,7 @@ class ResumeParserCoordinator:
             skills=skills,
             raw_text=resume_text[:5000] if len(resume_text) > 5000 else resume_text,
             confidence_score=confidence,
-            parsing_method="spacy_esco",
+            parsing_method=parsing_method,
             sections_found=sections_found,
         )
 

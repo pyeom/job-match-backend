@@ -118,7 +118,12 @@ async def require_email_verified(
 
     Returns the user unchanged if verified; raises HTTP 403 otherwise.
     """
-    if not current_user.email_verified and not os.getenv("SKIP_EMAIL_VERIFICATION", "").lower() in ("1", "true", "yes"):
+    from app.core.config import settings
+    skip_allowed = (
+        settings.app_env == "test"
+        and os.getenv("SKIP_EMAIL_VERIFICATION", "").lower() in ("1", "true", "yes")
+    )
+    if not current_user.email_verified and not skip_allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Email address not verified. Please check your inbox and verify your email before continuing.",

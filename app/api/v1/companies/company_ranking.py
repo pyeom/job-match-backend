@@ -456,7 +456,7 @@ async def get_candidate_explanation(
                 try:
                     strengths.append(_InsightItem(**s))
                 except Exception:
-                    pass
+                    logger.warning("Failed to deserialize strength insight item: %s", s, exc_info=True)
 
     alerts: list[_InsightItem] = []
     if existing_score.top_alerts and isinstance(existing_score.top_alerts, list):
@@ -465,7 +465,7 @@ async def get_candidate_explanation(
                 try:
                     alerts.append(_InsightItem(**a))
                 except Exception:
-                    pass
+                    logger.warning("Failed to deserialize alert insight item: %s", a, exc_info=True)
 
     from app.schemas.match_score import MatchScoreResult
     scores = MatchScoreResult(
@@ -540,7 +540,7 @@ async def get_interview_guide(
                 try:
                     guide_items.append(_IQ(**q))
                 except Exception:
-                    pass
+                    logger.warning("Failed to deserialize interview guide item: %s", q, exc_info=True)
 
     # Build plaintext version for copy-paste
     lines: list[str] = ["GUÍA DE ENTREVISTA", "=" * 40]

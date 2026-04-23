@@ -79,5 +79,5 @@ async def analyze_mala_response(
                 )
                 await db.commit()
             except Exception:
-                pass
+                logger.warning("Failed to persist MALA task failure status for user %s question %s", user_uuid, question_code, exc_info=True)
             raise

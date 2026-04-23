@@ -41,34 +41,68 @@ logger = logging.getLogger(__name__)
 # Stage transition helpers
 # ---------------------------------------------------------------------------
 
-VALID_STAGES = ['SUBMITTED', 'REVIEW', 'INTERVIEW', 'TECHNICAL', 'DECISION']
+def _normalize_stage(s: dict) -> dict:
+    """Normalize a stage dict from either old format {order,name,color} or new {key,order,label,description,color}."""
+    if "key" in s:
+        return s
+    name = s.get("name", "unknown")
+    return {
+        "key": name.lower().replace(" ", "_"),
+        "order": s.get("order", 0),
+        "label": name,
+        "description": "",
+        "color": s.get("color", "#6b7280"),
+    }
 
-STAGE_TRANSITIONS = {
-    'SUBMITTED': ['REVIEW'],
-    'REVIEW': ['INTERVIEW', 'SUBMITTED'],  # Can go back
-    'INTERVIEW': ['TECHNICAL', 'REVIEW'],  # Can go back
-    'TECHNICAL': ['DECISION', 'INTERVIEW'],  # Can go back
-    'DECISION': ['TECHNICAL']  # Can go back
-}
+
+async def get_company_pipeline_stages(company_id: uuid.UUID, db: AsyncSession) -> list[dict]:
+    """Return ordered list of stage dicts from the company pipeline.
+
+    Falls back to DEFAULT_PIPELINE_STAGES if no default template exists.
+    """
+    from app.models.pipeline import PipelineTemplate, DEFAULT_PIPELINE_STAGES
+    result = await db.execute(
+        select(PipelineTemplate).where(
+            PipelineTemplate.company_id == company_id,
+            PipelineTemplate.is_default == True,  # noqa: E712
+        )
+    )
+    template = result.scalar_one_or_none()
+    if template and template.stages:
+        return sorted([_normalize_stage(s) for s in template.stages], key=lambda s: s["order"])
+    return DEFAULT_PIPELINE_STAGES
 
 
-def validate_stage_transition(current_stage: str, new_stage: str) -> bool:
-    """Validate if stage transition is allowed"""
+def validate_stage_transition(
+    current_stage: str,
+    new_stage: str,
+    pipeline_stages: list[dict],
+) -> bool:
+    """Validate if a stage transition is allowed (adjacent stages only, forward or backward)."""
     if current_stage == new_stage:
-        return True  # No change is valid
+        return True  # No change is always valid
 
-    # Forward progression
-    if new_stage in STAGE_TRANSITIONS.get(current_stage, []):
-        return True
+    keys = [s["key"] for s in pipeline_stages]
+    if current_stage not in keys or new_stage not in keys:
+        return False
 
-    # Backward progression (allow going back to any previous stage)
-    stage_order = VALID_STAGES
-    current_idx = stage_order.index(current_stage)
-    new_idx = stage_order.index(new_stage)
-    if new_idx < current_idx:
-        return True
+    current_idx = keys.index(current_stage)
+    new_idx = keys.index(new_stage)
+    return abs(new_idx - current_idx) == 1
 
-    return False
+
+def get_stage_info(stage_key: str, pipeline_stages: list[dict]) -> dict:
+    """Return the stage metadata dict for the given key, or a grey fallback."""
+    for s in pipeline_stages:
+        if s["key"] == stage_key:
+            return s
+    return {
+        "key": stage_key,
+        "order": 0,
+        "label": stage_key,
+        "description": "",
+        "color": "#6b7280",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +214,7 @@ def _build_anonymous_response(
     app: Application,
     user: User,
     job: Job,
+    stage_info: Optional[dict] = None,
 ) -> ApplicationAnonymousSchema:
     """Construct an anonymous application response (no PII)."""
     return ApplicationAnonymousSchema(
@@ -202,6 +237,7 @@ def _build_anonymous_response(
             experience=user.experience,
             education=user.education,
         ),
+        stage_info=stage_info,
     )
 
 
@@ -210,6 +246,7 @@ def _build_revealed_response(
     user: User,
     job: Job,
     reveal: RevealedApplication,
+    stage_info: Optional[dict] = None,
 ) -> ApplicationRevealedSchema:
     """Construct a revealed application response (full PII included)."""
     return ApplicationRevealedSchema(
@@ -245,6 +282,7 @@ def _build_revealed_response(
             experience=user.experience,
             education=user.education,
         ),
+        stage_info=stage_info,
     )
 
 
@@ -284,6 +322,9 @@ async def get_job_applications(
     job = job_result.scalar_one_or_none()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    # Fetch the company pipeline once for stage_info enrichment
+    pipeline_stages = await get_company_pipeline_stages(company_id, db)
 
     # Parse cursor
     c_score: Optional[float] = None
@@ -337,10 +378,11 @@ async def get_job_applications(
     items: list[Union[ApplicationAnonymousSchema, ApplicationRevealedSchema]] = []
     for app, user, job_info, company in rows:
         reveal = revealed_map.get(app.id)
+        si = get_stage_info(app.stage, pipeline_stages)
         if reveal:
-            items.append(_build_revealed_response(app, user, job_info, reveal))
+            items.append(_build_revealed_response(app, user, job_info, reveal, stage_info=si))
         else:
-            items.append(_build_anonymous_response(app, user, job_info))
+            items.append(_build_anonymous_response(app, user, job_info, stage_info=si))
 
     next_cursor: Optional[str] = None
     if has_next and items:
@@ -391,6 +433,9 @@ async def update_application_status(
     application, user, job = row
     require_company_access(current_user, job.company_id)
 
+    # Load the company pipeline for dynamic stage validation and stage_info enrichment
+    pipeline_stages = await get_company_pipeline_stages(job.company_id, db)
+
     # Validate: Cannot modify terminal state applications
     if application.status in ['HIRED', 'REJECTED']:
         raise HTTPException(
@@ -403,7 +448,7 @@ async def update_application_status(
 
     # Validate and update stage
     if update_data.stage is not None:
-        if not validate_stage_transition(application.stage, update_data.stage):
+        if not validate_stage_transition(application.stage, update_data.stage, pipeline_stages):
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid stage transition from {application.stage} to {update_data.stage}"
@@ -525,6 +570,7 @@ async def update_application_status(
         created_at=application.created_at,
         updated_at=application.updated_at or application.created_at,
         score=application.score,
+        stage_info=get_stage_info(application.stage, pipeline_stages),
     )
 
 
@@ -550,6 +596,9 @@ async def get_all_company_applications(
     the identity has been revealed include full PII in the ``candidate`` field.
     """
     company_id = current_user.company_id
+
+    # Fetch the company pipeline once for stage_info enrichment
+    pipeline_stages = await get_company_pipeline_stages(company_id, db)
 
     # Parse cursor
     c_score: Optional[float] = None
@@ -615,10 +664,11 @@ async def get_all_company_applications(
     items: list[Union[ApplicationAnonymousSchema, ApplicationRevealedSchema]] = []
     for app, user, job in rows:
         reveal = revealed_map.get(app.id)
+        si = get_stage_info(app.stage, pipeline_stages)
         if reveal:
-            items.append(_build_revealed_response(app, user, job, reveal))
+            items.append(_build_revealed_response(app, user, job, reveal, stage_info=si))
         else:
-            items.append(_build_anonymous_response(app, user, job))
+            items.append(_build_anonymous_response(app, user, job, stage_info=si))
 
     next_cursor: Optional[str] = None
     if has_next and items:
@@ -676,6 +726,9 @@ async def reveal_candidate_identity(
             detail="Access denied. Application does not belong to your company."
         )
 
+    # Fetch pipeline stages for stage_info enrichment
+    pipeline_stages = await get_company_pipeline_stages(company_id, db)
+
     # Check whether identity has already been revealed (idempotency)
     existing_reveal_result = await db.execute(
         select(RevealedApplication).where(
@@ -709,7 +762,10 @@ async def reveal_candidate_identity(
             "reveal_candidate already exists: application_id=%s", application_id
         )
 
-    return _build_revealed_response(application, user, job, reveal).model_dump()
+    return _build_revealed_response(
+        application, user, job, reveal,
+        stage_info=get_stage_info(application.stage, pipeline_stages),
+    ).model_dump()
 
 
 # ---------------------------------------------------------------------------

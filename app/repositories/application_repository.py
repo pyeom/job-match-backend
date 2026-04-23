@@ -77,6 +77,39 @@ class ApplicationRepository(BaseRepository[Application]):
             logger.error(f"Error fetching application {id} with relationships: {e}")
             raise
 
+    async def get_by_user_and_job(
+        self,
+        db: AsyncSession,
+        user_id: UUID,
+        job_id: UUID,
+    ) -> Optional[Application]:
+        """Return an application for a specific (user, job) pair, or None.
+
+        Used during swipe creation to avoid creating duplicate application rows
+        when a user re-swipes RIGHT on a job they previously swiped on.
+
+        Args:
+            db: Active database session
+            user_id: UUID of the applicant
+            job_id: UUID of the job
+
+        Returns:
+            Application instance if one exists, None otherwise
+        """
+        try:
+            stmt = select(Application).where(
+                Application.user_id == user_id,
+                Application.job_id == job_id,
+            )
+            result = await db.execute(stmt)
+            return result.scalar_one_or_none()
+        except SQLAlchemyError as e:
+            logger.error(
+                "Error fetching application for user %s on job %s: %s",
+                user_id, job_id, e,
+            )
+            raise
+
     async def get_applications_for_job(
         self,
         db: AsyncSession,

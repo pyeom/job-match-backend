@@ -391,17 +391,20 @@ Sé específico con la evidencia del candidato.
 Termina con una recomendación clara: avanzar / explorar más / no recomendado."""
 
 
+_DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+
 async def generate_explanation_text_llm(
     candidate: User,
     job: Job,
     scores: MatchScoreResult,
     puc: Optional[CandidatePUCProfile] = None,
 ) -> str:
-    """Generate a natural-language explanation of the match score via Anthropic.
+    """Generate a natural-language explanation of the match score via Qwen-Plus.
 
     Falls back to the template-based explanation from match_score_service if:
-    - anthropic package is not installed
-    - ANTHROPIC_API_KEY is not set
+    - openai package is not installed
+    - DASHSCOPE_API_KEY is not set
     - The API call fails
 
     Returns:
@@ -409,13 +412,13 @@ async def generate_explanation_text_llm(
     """
     from app.core.config import settings  # avoid circular import at module load
 
-    api_key = settings.anthropic_api_key
+    api_key = settings.dashscope_api_key
     if not api_key:
-        logger.debug("ANTHROPIC_API_KEY not set — falling back to template explanation")
+        logger.debug("DASHSCOPE_API_KEY not set — falling back to template explanation")
         return _template_explanation(scores)
 
     try:
-        import anthropic  # optional dependency
+        from openai import AsyncOpenAI  # optional dependency
 
         archetype = (puc.primary_archetype or "desconocido") if puc else "desconocido"
         strengths_text = "; ".join(s.title for s in scores.top_strengths) or "ninguna detectada"
@@ -440,19 +443,19 @@ async def generate_explanation_text_llm(
             alerts=alerts_text,
         )
 
-        client = anthropic.AsyncAnthropic(api_key=api_key)
-        message = await client.messages.create(
-            model="claude-sonnet-4-6",
+        client = AsyncOpenAI(api_key=api_key, base_url=_DASHSCOPE_BASE_URL)
+        response = await client.chat.completions.create(
+            model=settings.qwen_model,
             max_tokens=600,
             messages=[{"role": "user", "content": prompt}],
         )
-        return message.content[0].text.strip()
+        return response.choices[0].message.content.strip()
 
     except ImportError:
-        logger.warning("anthropic package not installed — falling back to template explanation")
+        logger.warning("openai package not installed — falling back to template explanation")
         return _template_explanation(scores)
     except Exception as exc:
-        logger.error("Anthropic API call failed: %s", exc, exc_info=True)
+        logger.error("Qwen API call failed: %s", exc, exc_info=True)
         return _template_explanation(scores)
 
 

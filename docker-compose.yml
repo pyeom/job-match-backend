@@ -151,6 +151,12 @@ services:
       SENTENCE_TRANSFORMERS_HOME: /home/runner/.cache/huggingface
       REDIS_URL: ${REDIS_URL}
       ELASTICSEARCH_URL: ${ELASTICSEARCH_URL:-http://elasticsearch:9200}
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'arq app.tasks.worker' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     depends_on:
       db:

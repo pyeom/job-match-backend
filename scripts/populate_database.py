@@ -228,6 +228,29 @@ class APIClient:
             return False
 
 
+# ---------------------------------------------------------------------------
+# Company pipeline definitions — each company gets a distinct hiring process
+# ---------------------------------------------------------------------------
+
+COMPANY_PIPELINES: Dict[str, List[Dict]] = {
+    # Mid-size tech company: formal multi-stage process with technical review
+    "TechVision Solutions": [
+        {"key": "applied",      "order": 1, "label": "Applied",           "description": "New application received",                     "color": "#6366f1"},
+        {"key": "phone_screen", "order": 2, "label": "Phone Screen",      "description": "Initial 30-min call with recruiter",            "color": "#f59e0b"},
+        {"key": "tech_review",  "order": 3, "label": "Technical Review",  "description": "Async coding challenge or take-home assessment", "color": "#3b82f6"},
+        {"key": "interview",    "order": 4, "label": "Interview",         "description": "Panel interview with engineering team",          "color": "#8b5cf6"},
+        {"key": "offer",        "order": 5, "label": "Offer Extended",    "description": "Offer letter sent, awaiting acceptance",         "color": "#10b981"},
+    ],
+    # Early-stage startup: lean 4-step process, fast decisions
+    "DataFlow Innovations": [
+        {"key": "applied",    "order": 1, "label": "Applied",    "description": "Application submitted",                             "color": "#6366f1"},
+        {"key": "screening",  "order": 2, "label": "Screening",  "description": "CV review and skills assessment",                   "color": "#f59e0b"},
+        {"key": "interview",  "order": 3, "label": "Interview",  "description": "Video call with hiring manager and team lead",      "color": "#ec4899"},
+        {"key": "decision",   "order": 4, "label": "Decision",   "description": "Final decision — offer or rejection communicated",  "color": "#10b981"},
+    ],
+}
+
+
 class DatabasePopulator:
     """Main class for database population"""
 
@@ -240,6 +263,7 @@ class DatabasePopulator:
         self.created_users: List[Dict] = []
         self.created_recruiters: List[Dict] = []
         self.created_teams: List[Dict] = []
+        self.created_pipelines: Dict[str, List[Dict]] = {}  # company_name → stages
 
     async def reset_database(self) -> None:
         """Reset the database by removing all data.
@@ -743,6 +767,61 @@ Join our growing engineering team and help scale our data platform to millions o
         self.created_teams = created_teams
         return created_teams
 
+    async def create_pipelines(self) -> Dict[str, List[Dict]]:
+        """Create a custom pipeline template for each company.
+
+        Uses COMPANY_PIPELINES definitions above.  Each company gets exactly one
+        is_default=True PipelineTemplate row.  Existing templates are replaced.
+        """
+        logger.info("🔀 Creating company pipeline templates...")
+
+        if not self.created_companies:
+            logger.warning("⚠️  No companies found. Skipping pipeline creation.")
+            return {}
+
+        async with AsyncSessionLocal() as session:
+            try:
+                for company_info in self.created_companies:
+                    company_name = company_info["company_name"]
+                    company_id = uuid.UUID(company_info["company_id"])
+                    stages = COMPANY_PIPELINES.get(company_name)
+
+                    if not stages:
+                        logger.warning(f"⚠️  No pipeline definition for {company_name}, skipping.")
+                        continue
+
+                    # Delete any existing default template for this company
+                    await session.execute(
+                        delete(PipelineTemplate).where(
+                            PipelineTemplate.company_id == company_id,
+                            PipelineTemplate.is_default == True,  # noqa: E712
+                        )
+                    )
+                    await session.flush()
+
+                    template = PipelineTemplate(
+                        id=uuid.uuid4(),
+                        company_id=company_id,
+                        name="Default",
+                        stages=stages,
+                        is_default=True,
+                    )
+                    session.add(template)
+                    self.created_pipelines[company_name] = stages
+                    logger.info(
+                        f"✅ Pipeline for {company_name}: "
+                        + " → ".join(s["label"] for s in stages)
+                    )
+
+                await session.commit()
+
+            except Exception as e:
+                await session.rollback()
+                logger.error(f"❌ Failed to create pipelines: {e}")
+                raise DatabasePopulationError(f"Failed to create pipelines: {e}")
+
+        return self.created_pipelines
+
     async def create_job_seekers(self) -> List[Dict]:
         """Create multiple job seeker profiles with different backgrounds"""
         logger.info("👤 Creating job seeker profiles...")
@@ -870,14 +949,22 @@ Join our growing engineering team and help scale our data platform to millions o
         return created_users
 
     async def create_sample_applications(self) -> List[Dict]:
-        """Create sample applications with varied stages, statuses, and stage history."""
+        """Create sample applications using each company's custom pipeline stage keys."""
         logger.info("📋 Creating sample applications...")
 
         if not self.created_users or not self.created_jobs:
             logger.warning("⚠️  No users or jobs found. Skipping applications creation.")
             return []
 
-        stages = ['SUBMITTED', 'REVIEW', 'INTERVIEW', 'TECHNICAL', 'DECISION']
+        # Fall back to default stages if pipelines weren't created
+        default_stages = [
+            {"key": "SUBMITTED", "order": 1},
+            {"key": "REVIEW",    "order": 2},
+            {"key": "INTERVIEW", "order": 3},
+            {"key": "TECHNICAL", "order": 4},
+            {"key": "DECISION",  "order": 5},
+        ]
+
         rejection_reasons = [
             'Not enough experience',
             'Skills mismatch',
@@ -891,20 +978,28 @@ Join our growing engineering team and help scale our data platform to millions o
 
         async with AsyncSessionLocal() as session:
             try:
-                job_ids = [uuid.UUID(job["job_data"]["id"]) for job in self.created_jobs]
                 user_ids = [uuid.UUID(user["profile"]["id"]) for user in self.created_users]
 
                 for job_data in self.created_jobs:
                     job_id = uuid.UUID(job_data["job_data"]["id"])
+                    company_name = job_data["company"]
+
+                    # Use company-specific pipeline stages or fall back to defaults
+                    pipeline = self.created_pipelines.get(company_name, default_stages)
+                    stage_keys = [s["key"] for s in pipeline]
+
                     num_applications = random.randint(2, 4)
                     selected_users = random.sample(user_ids, min(num_applications, len(user_ids)))
 
                     for user_id in selected_users:
-                        # Distribute across stages realistically
-                        stage_weights = [0.4, 0.25, 0.15, 0.1, 0.1]
-                        stage = random.choices(stages, weights=stage_weights)[0]
+                        # Weight earlier stages more heavily (realistic funnel)
+                        n = len(stage_keys)
+                        weights = [max(0.05, 0.5 - 0.1 * i) for i in range(n)]
+                        stage_idx = random.choices(range(n), weights=weights)[0]
+                        stage = stage_keys[stage_idx]
+                        is_last_stage = stage_idx == n - 1
 
-                        if stage == 'DECISION':
+                        if is_last_stage:
                             status = random.choices(
                                 ['ACTIVE', 'HIRED', 'REJECTED'], weights=[0.3, 0.4, 0.3]
                             )[0]
@@ -917,8 +1012,8 @@ Join our growing engineering team and help scale our data platform to millions o
                         if status == 'REJECTED':
                             rejection_reason = random.choice(rejection_reasons)
 
-                        # Build stage_history JSONB — track path from SUBMITTED to current stage
-                        stage_path = stages[:stages.index(stage) + 1]
+                        # Build stage_history JSONB — transitions from first stage to current
+                        stage_path = stage_keys[:stage_idx + 1]
                         stage_history_json = []
                         base_time = datetime.utcnow() - timedelta(days=random.randint(1, 60))
                         for i in range(len(stage_path) - 1):
@@ -943,7 +1038,7 @@ Join our growing engineering team and help scale our data platform to millions o
                         session.add(application)
                         await session.flush()
 
-                        # Create ApplicationStageHistory rows for each transition
+                        # ApplicationStageHistory rows — one per transition
                         for i, transition in enumerate(stage_history_json):
                             entered = datetime.fromisoformat(transition["timestamp"])
                             exited = (
@@ -951,10 +1046,11 @@ Join our growing engineering team and help scale our data platform to millions o
                                 if i + 1 < len(stage_history_json)
                                 else None
                             )
+                            to_order = stage_keys.index(transition["to_stage"]) + 1
                             session.add(ApplicationStageHistory(
                                 id=uuid.uuid4(),
                                 application_id=application.id,
-                                stage_order=stages.index(transition["to_stage"]) + 1,
+                                stage_order=to_order,
                                 stage_name=transition["to_stage"],
                                 entered_at=entered,
                                 exited_at=exited,
@@ -963,6 +1059,7 @@ Join our growing engineering team and help scale our data platform to millions o
                         created_applications.append({
                             "user_id": str(user_id),
                             "job_id": str(job_id),
+                            "company": company_name,
                             "stage": stage,
                             "status": status,
                         })
@@ -1146,6 +1243,7 @@ async def main():
 
             if args.all:
                 await populator.create_teams()
+                await populator.create_pipelines()
                 await populator.create_sample_applications()
 
             if not args.validate_only:
@@ -1191,6 +1289,12 @@ async def main():
                 print("\n👥 CREATED TEAMS:")
                 for team in report["teams"]:
                     print(f"  • {team['name']} @ {team['company']} — {team['members']} members, {team['jobs']} jobs")
+
+            if populator.created_pipelines:
+                print("\n🔀 COMPANY PIPELINES:")
+                for company_name, stages in populator.created_pipelines.items():
+                    pipeline_str = " → ".join(s["label"] for s in stages)
+                    print(f"  • {company_name}: {pipeline_str}")
 
             print("\n🔐 LOGIN CREDENTIALS:")
             for cred in report["login_credentials"]:

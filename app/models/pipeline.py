@@ -7,14 +7,11 @@ from app.core.database import Base
 
 
 DEFAULT_PIPELINE_STAGES = [
-    {"order": 1, "name": "Postulación",  "color": "#6366f1"},
-    {"order": 2, "name": "CV Revisado",  "color": "#f59e0b"},
-    {"order": 3, "name": "Contacto HR",  "color": "#3b82f6"},
-    {"order": 4, "name": "Entrevista",   "color": "#8b5cf6"},
-    {"order": 5, "name": "Técnica",      "color": "#ec4899"},
-    {"order": 6, "name": "Oferta",       "color": "#10b981"},
-    {"order": 7, "name": "Contratado",   "color": "#22c55e"},
-    {"order": 8, "name": "Descartado",   "color": "#6b7280"},
+    {"key": "SUBMITTED",  "order": 1, "label": "Applied",    "description": "",  "color": "#6366f1"},
+    {"key": "REVIEW",     "order": 2, "label": "Screening",  "description": "",  "color": "#f59e0b"},
+    {"key": "INTERVIEW",  "order": 3, "label": "Interview",  "description": "",  "color": "#3b82f6"},
+    {"key": "TECHNICAL",  "order": 4, "label": "Technical",  "description": "",  "color": "#8b5cf6"},
+    {"key": "DECISION",   "order": 5, "label": "Offer",      "description": "",  "color": "#10b981"},
 ]
 
 

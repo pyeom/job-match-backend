@@ -26,12 +26,6 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(_prepare_password(plain_password), hashed_password)
 
 
-def verify_password_legacy(plain_password: str, hashed_password: str) -> bool:
-    """Verify using the old truncation method — used only for migration on login."""
-    truncated = plain_password.encode("utf-8")[:72].decode("utf-8", errors="ignore")
-    return pwd_context.verify(truncated, hashed_password)
-
-
 def get_password_hash(password: str) -> str:
     """Hash a password with bcrypt using SHA-256 pre-hashing."""
     return pwd_context.hash(_prepare_password(password))

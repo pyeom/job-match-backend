@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_job_seeker
 from app.core.arq import get_arq_pool
 from app.core.database import get_db
+from app.data.archetype_metadata import ARCHETYPE_METADATA
 from app.data.mala_questions import (
     MALA_QUESTIONS,
     get_next_question,
@@ -21,6 +22,9 @@ from app.models.user import User
 from app.repositories.mala_response_repository import MalaResponseRepository
 from app.repositories.puc_profile_repository import PUCProfileRepository
 from app.schemas.mala import (
+    ArchetypeDataSchema,
+    ArchetypeResponseSchema,
+    BigFiveSchema,
     BlockStatus,
     MalaProgressSchema,
     MalaResponseCreate,
@@ -195,7 +199,7 @@ async def get_response_status(
         )
     return {
         "status": response.processing_status,
-        "error": response.processing_error,
+        "processing_error": response.processing_error,
     }
 
 
@@ -214,3 +218,69 @@ async def delete_response(
     await _mala_repo.delete(db, response.id)
     await _puc_repo.upsert(db, current_user.id, {"puc_vector": None})
     await db.commit()
+
+
+@router.get("/archetype", response_model=ArchetypeResponseSchema)
+async def get_archetype(
+    current_user: User = Depends(get_job_seeker),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return the computed archetype for the authenticated job seeker.
+
+    Display strings (name, strengths, risks, ideal_cultures, matching_note)
+    are intentionally absent from the response — the frontend resolves them
+    from i18n keys ``archetypes.<primary_archetype>.*``.
+    Only non-translatable visual properties (emoji, color) are included in
+    ``archetype_data``.
+    """
+    puc_profile = await _puc_repo.get_by_user_id(db, current_user.id)
+    if not puc_profile or not puc_profile.primary_archetype:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Archetype not computed yet. Complete more assessment questions.",
+        )
+
+    archetype_id = puc_profile.primary_archetype
+    # Fall back to a known entry if an unexpected id slips through.
+    visual = ARCHETYPE_METADATA.get(
+        archetype_id,
+        ARCHETYPE_METADATA["ejecutor_alto_impacto"],
+    )
+
+    probs: dict[str, float] = puc_profile.archetype_probabilities or {archetype_id: 1.0}
+
+    # Hybrid: top-two archetypes within 15 percentage points of each other.
+    sorted_probs = sorted(probs.values(), reverse=True)
+    is_hybrid = len(sorted_probs) >= 2 and (sorted_probs[0] - sorted_probs[1]) < 0.15
+    hybrid_description: Optional[str] = None
+    if is_hybrid:
+        second_id = next(
+            (k for k, v in sorted(probs.items(), key=lambda x: x[1], reverse=True) if k != archetype_id),
+            None,
+        )
+        if second_id:
+            # Return both archetype IDs so the frontend can translate them.
+            hybrid_description = f"{archetype_id}+{second_id}"
+
+    stability_warning = (puc_profile.completeness_score or 0.0) < 0.5
+
+    big_five = None
+    if puc_profile.openness is not None:
+        big_five = BigFiveSchema(
+            openness=(puc_profile.openness or 0.5) * 100,
+            conscientiousness=(puc_profile.conscientiousness or 0.5) * 100,
+            extraversion=(puc_profile.extraversion or 0.5) * 100,
+            agreeableness=(puc_profile.agreeableness or 0.5) * 100,
+            emotional_stability=(puc_profile.emotional_stability or 0.5) * 100,
+        )
+
+    return {
+        "primary_archetype": archetype_id,
+        "probabilities": probs,
+        "is_hybrid": is_hybrid,
+        "hybrid_description": hybrid_description,
+        "stability_warning": stability_warning,
+        "archetype_data": ArchetypeDataSchema(emoji=visual["emoji"], color=visual["color"]),
+        "big_five": big_five,
+        "completeness_score": puc_profile.completeness_score or 0.0,
+    }

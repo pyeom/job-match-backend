@@ -19,14 +19,7 @@ from app.schemas.company import (
     CompanyUpdate,
     CompanyDashboardStats
 )
-from pydantic import BaseModel
 import uuid
-
-
-class CompanyEmployeesResponse(BaseModel):
-    """Response model for company employees endpoint"""
-    employees: List[dict] = []
-    message: str
 
 
 router = APIRouter()
@@ -105,32 +98,16 @@ async def get_company_details(
     return company
 
 
-@router.get("/{company_id}/employees", response_model=CompanyEmployeesResponse)
+@router.get("/{company_id}/employees")
 async def get_company_employees(
     company_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get company employees information - placeholder endpoint for future implementation"""
-    # Verify company exists and is active
-    result = await db.execute(
-        select(Company).where(
-            and_(
-                Company.id == company_id,
-                Company.is_active == True
-            )
-        )
-    )
-    company = result.scalar_one_or_none()
-
-    if not company:
-        raise HTTPException(status_code=404, detail="Company not found")
-
-    # For now, return empty list since employee management is not implemented
-    # Future implementation would return actual employee data based on privacy settings
-    return CompanyEmployeesResponse(
-        employees=[],
-        message="Employee information not available or privacy restricted"
+    """Employee list endpoint — not yet implemented."""
+    raise HTTPException(
+        status_code=status.HTTP_501_NOT_IMPLEMENTED,
+        detail="Employee list not yet implemented",
     )
 
 
@@ -196,71 +173,6 @@ async def update_company(
     await db.commit()
     await db.refresh(company)
     await invalidate_company_cache(str(company_id))
-
-    return company
-
-
-# Legacy endpoints for backward compatibility (deprecated)
-@router.get("/me", response_model=CompanySchema, deprecated=True)
-async def get_my_company_legacy(
-    current_user: User = Depends(get_company_user_with_verification),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    DEPRECATED: Get current user's company information
-    Use GET /companies/{company_id} instead
-    """
-    # Load company with statistics
-    result = await db.execute(
-        select(
-            Company,
-            func.count(Job.id).label("job_count"),
-            func.count(User.id).label("user_count")
-        )
-        .outerjoin(Job, and_(Job.company_id == Company.id, Job.is_active == True))
-        .outerjoin(User, User.company_id == Company.id)
-        .where(Company.id == current_user.company_id)
-        .group_by(Company.id)
-    )
-
-    row = result.first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Company not found")
-
-    company = row[0]
-    company_dict = CompanySchema.from_orm(company).dict()
-    company_dict["job_count"] = row[1] or 0
-    company_dict["user_count"] = row[2] or 0
-
-    return CompanySchema(**company_dict)
-
-
-@router.patch("/me", response_model=CompanySchema, deprecated=True)
-async def update_my_company_legacy(
-    company_update: CompanyUpdate,
-    current_user: User = Depends(get_company_admin),  # Only admins can update company
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    DEPRECATED: Update current user's company information
-    Use PATCH /companies/{company_id} instead
-    """
-    result = await db.execute(
-        select(Company).where(Company.id == current_user.company_id)
-    )
-    company = result.scalar_one_or_none()
-
-    if not company:
-        raise HTTPException(status_code=404, detail="Company not found")
-
-    # Update company fields
-    update_data = company_update.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(company, field, value)
-
-    await db.commit()
-    await db.refresh(company)
-    await invalidate_company_cache(str(current_user.company_id))
 
     return company
 

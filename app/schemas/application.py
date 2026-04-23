@@ -5,7 +5,8 @@ import uuid
 
 
 # Stage and Status type definitions
-ApplicationStage = Literal['SUBMITTED', 'REVIEW', 'INTERVIEW', 'TECHNICAL', 'DECISION']
+# ApplicationStage is now dynamic — validated against the company's pipeline at runtime.
+ApplicationStage = str
 ApplicationStatus = Literal['ACTIVE', 'HIRED', 'REJECTED']
 
 
@@ -81,6 +82,7 @@ class ApplicationWithDetails(Application):
     """Application with user and job details for company dashboard and job seeker view"""
     user: Optional[UserBasicInfo] = None
     job: Optional["JobDetails"] = None
+    stage_info: Optional[dict] = None  # Stage metadata from company pipeline
 
     class Config:
         from_attributes = True
@@ -145,6 +147,7 @@ class ApplicationWithUserResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     score: Optional[int] = None  # Match score (0-100)
+    stage_info: Optional[dict] = None  # Stage metadata from company pipeline
 
     class Config:
         from_attributes = True
@@ -224,6 +227,7 @@ class ApplicationAnonymousSchema(BaseModel):
     updated_at: Optional[datetime] = None
     is_revealed: bool = False
     candidate: AnonymousCandidateInfo
+    stage_info: Optional[dict] = None  # Stage metadata from company pipeline
 
     class Config:
         from_attributes = True
@@ -259,6 +263,7 @@ class ApplicationRevealedSchema(BaseModel):
     is_revealed: bool = True
     reveal_info: Optional[RevealRecord] = None
     candidate: RevealedCandidateInfo
+    stage_info: Optional[dict] = None  # Stage metadata from company pipeline
 
     class Config:
         from_attributes = True

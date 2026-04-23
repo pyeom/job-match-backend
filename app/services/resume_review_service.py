@@ -3,11 +3,15 @@ AI-powered resume review service.
 
 This service analyzes resumes and provides actionable improvement suggestions.
 It evaluates structure, content, keywords, formatting, and relevance to target jobs.
-Supports English and Spanish resumes.
+Supports English, Spanish, and Portuguese resumes.
 """
 
 from typing import Optional, List, Dict, Set
 from uuid import UUID
+from dataclasses import dataclass, field
+import asyncio
+import hashlib
+import json
 import re
 import logging
 
@@ -21,6 +25,79 @@ from app.models.job import Job
 from app.services.resume_parser_service import ResumeParserService
 
 logger = logging.getLogger(__name__)
+
+DASHSCOPE_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+# Cache TTL: 30 days in seconds
+_REVIEW_CACHE_TTL = 2_592_000
+
+# JSON schema — defined once, shared across all language prompts
+_SCHEMA = (
+    '{"summary":str,"strengths":[str],"weaknesses":[str],'
+    '"top_suggestions":[str],"section_feedback":{"<section>":'
+    '{"strengths":[str],"weaknesses":[str],"suggestions":[str]}}}'
+)
+
+# i18n system prompts — one per language, referencing the shared schema
+_PROMPTS: Dict[str, str] = {
+    "en": (
+        "Expert resume reviewer. Output ONLY valid JSON, no markdown.\n"
+        f"Schema: {_SCHEMA}\n"
+        "Rules: specific+actionable, reference real content, empty arrays not null, "
+        "max 5 items per list, max 7 top_suggestions."
+    ),
+    "es": (
+        "Revisor experto de currículums. Responde SOLO con JSON válido, sin markdown.\n"
+        f"Esquema: {_SCHEMA}\n"
+        "Reglas: específico y accionable, referencia contenido real, arrays vacíos no null, "
+        "máx 5 items por lista, máx 7 top_suggestions."
+    ),
+    "pt": (
+        "Revisor especialista de currículos. Responda APENAS com JSON válido, sem markdown.\n"
+        f"Esquema: {_SCHEMA}\n"
+        "Regras: específico e acionável, referencie conteúdo real, arrays vazios não null, "
+        "máx 5 itens por lista, máx 7 top_suggestions."
+    ),
+}
+_DEFAULT_LANG = "en"
+
+# Simple vocabulary sets used for heuristic language detection
+_ES_MARKERS: Set[str] = {
+    "experiencia", "educación", "educacion", "habilidades", "resumen",
+    "objetivo", "formación", "formacion", "logros", "idiomas", "referencias",
+}
+_PT_MARKERS: Set[str] = {
+    "experiência", "experiencia", "educação", "educacao", "habilidades",
+    "resumo", "objetivo", "formação", "formacao", "conquistas", "idiomas",
+    "referências", "referencias",
+}
+
+
+def _detect_language(text: str) -> str:
+    """Heuristic language detection — returns 'en', 'es', or 'pt'."""
+    sample = text[:2000].lower()
+    words = set(re.findall(r"[a-záéíóúàâãêôõüñç]+", sample))
+    pt_hits = len(words & _PT_MARKERS)
+    es_hits = len(words & _ES_MARKERS)
+    # Portuguese marker set is a superset of some Spanish words, so require
+    # at least one unique Portuguese marker (ã/ê/õ/ç accent signals).
+    pt_unique = bool(re.search(r"[ãâêôõç]", sample))
+    if pt_hits >= 2 and pt_unique:
+        return "pt"
+    if es_hits >= 2:
+        return "es"
+    return "en"
+
+
+@dataclass
+class LLMReviewResult:
+    """Structured result from the LLM resume analysis."""
+
+    summary: str
+    strengths: List[str] = field(default_factory=list)
+    weaknesses: List[str] = field(default_factory=list)
+    top_suggestions: List[str] = field(default_factory=list)
+    section_feedback: Dict[str, Dict] = field(default_factory=dict)
 
 
 class ResumeReviewService:
@@ -78,7 +155,211 @@ class ResumeReviewService:
         "impulse", "inicié", "inicie", "supervisé", "supervise"
     }
 
-    def analyze_resume(
+    def __init__(self) -> None:
+        self._async_client = None
+        self._redis_client = None
+
+    # ------------------------------------------------------------------
+    # Redis cache (async client, lazy-initialized)
+    # ------------------------------------------------------------------
+
+    async def _get_redis(self):
+        """Return a lazy-initialized async Redis client, or None on error."""
+        if self._redis_client is not None:
+            return self._redis_client
+        try:
+            import redis.asyncio as aioredis
+            from app.core.config import settings
+            self._redis_client = aioredis.from_url(
+                settings.redis_url,
+                decode_responses=True,
+            )
+            return self._redis_client
+        except Exception as exc:
+            logger.warning("Failed to init Redis for review cache: %s", exc)
+            return None
+
+    async def _cache_get(self, key: str) -> Optional[LLMReviewResult]:
+        """Read a cached LLMReviewResult. Returns None on miss or error."""
+        try:
+            r = await self._get_redis()
+            if r is None:
+                return None
+            raw = await r.get(key)
+            if raw is None:
+                return None
+            data = json.loads(raw)
+            raw_sf: Dict[str, Dict] = data.get("section_feedback") or {}
+            return LLMReviewResult(
+                summary=str(data.get("summary") or ""),
+                strengths=list(data.get("strengths") or []),
+                weaknesses=list(data.get("weaknesses") or []),
+                top_suggestions=list(data.get("top_suggestions") or []),
+                section_feedback={k.lower(): v for k, v in raw_sf.items()},
+            )
+        except Exception as exc:
+            logger.debug("Review cache read error (ignored): %s", exc)
+            return None
+
+    async def _cache_set(self, key: str, result: LLMReviewResult) -> None:
+        """Write an LLMReviewResult to cache. Silently ignores errors."""
+        try:
+            r = await self._get_redis()
+            if r is None:
+                return
+            payload = json.dumps({
+                "summary": result.summary,
+                "strengths": result.strengths,
+                "weaknesses": result.weaknesses,
+                "top_suggestions": result.top_suggestions,
+                "section_feedback": result.section_feedback,
+            })
+            await r.set(key, payload, ex=_REVIEW_CACHE_TTL)
+        except Exception as exc:
+            logger.debug("Review cache write error (ignored): %s", exc)
+
+    def _get_async_client(self):
+        """Lazy-initialise an async OpenAI-compatible client for DashScope.
+
+        Returns None if DASHSCOPE_API_KEY is not configured.
+        """
+        try:
+            from app.core.config import settings
+            import openai
+
+            if not settings.dashscope_api_key:
+                return None
+
+            if self._async_client is None:
+                self._async_client = openai.AsyncOpenAI(
+                    api_key=settings.dashscope_api_key,
+                    base_url=DASHSCOPE_BASE_URL,
+                )
+            return self._async_client
+        except Exception as exc:
+            logger.warning(f"Could not initialise DashScope async client: {exc}")
+            return None
+
+    @staticmethod
+    def _build_structured_input(
+        resume_text: str,
+        rule_scores: Dict[str, float],
+        sections: List[ResumeSection],
+        target_job: Optional[Job] = None,
+    ) -> str:
+        """Build a compact, token-efficient structured summary of the resume.
+
+        Replaces the raw resume_text[:4000] blob sent to the LLM.
+        Stays well under 400 tokens for typical resumes.
+        """
+        structure = round(rule_scores.get("structure", 0) * 100)
+        content = round(rule_scores.get("content", 0) * 100)
+        formatting = round(rule_scores.get("formatting", 0) * 100)
+
+        # Extract first non-empty line as a best-effort candidate name
+        first_line = next(
+            (ln.strip() for ln in resume_text.splitlines() if ln.strip()),
+            "",
+        )
+
+        section_names = ", ".join(s.section_name for s in sections) if sections else "none detected"
+
+        lines = [
+            f"CANDIDATE: {first_line}" if first_line else "",
+            f"SECTIONS FOUND: {section_names}",
+            f"RULE SCORES: structure={structure}/100, content={content}/100, formatting={formatting}/100",
+        ]
+
+        # Add per-section brief (name + score only — no full text)
+        for sec in sections:
+            lines.append(f"SECTION {sec.section_name.upper()}: score={round(sec.score * 100)}/100")
+
+        if target_job:
+            job_line = f"TARGET JOB: {target_job.title}"
+            if target_job.tags:
+                job_line += f" | tags: {', '.join(target_job.tags[:10])}"
+            lines.append(job_line)
+
+        return "\n".join(ln for ln in lines if ln)
+
+    async def _llm_analyze(
+        self,
+        resume_text: str,
+        rule_scores: Dict[str, float],
+        sections: List[ResumeSection],
+        language: str,
+        target_job: Optional[Job] = None,
+    ) -> Optional[LLMReviewResult]:
+        """Call Qwen via DashScope to produce narrative resume feedback.
+
+        Returns None on any failure so the caller can fall back gracefully.
+        """
+        try:
+            from app.core.config import settings
+            client = self._get_async_client()
+            if client is None:
+                return None
+
+            # Normalise language code: "pt-BR" -> "pt", "en-US" -> "en"
+            lang = language.lower().split("-")[0].split("_")[0]
+            system_prompt = _PROMPTS.get(lang, _PROMPTS[_DEFAULT_LANG])
+
+            # Build compact structured input (instead of raw resume_text[:4000])
+            structured_input = self._build_structured_input(
+                resume_text, rule_scores, sections, target_job
+            )
+
+            # Cache key includes language so different prompt variants don't collide
+            target_job_id_str = str(target_job.id) if target_job else "none"
+            cache_key = (
+                f"resume_review_llm:{lang}:"
+                + hashlib.sha256(structured_input.encode()).hexdigest()[:32]
+                + f":{target_job_id_str}"
+            )
+
+            cached = await self._cache_get(cache_key)
+            if cached is not None:
+                logger.debug("Review LLM cache hit for key %s…", cache_key[:32])
+                return cached
+
+            response = await client.chat.completions.create(
+                model=settings.qwen_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": structured_input},
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.3,
+                max_tokens=1500,
+                timeout=25,
+            )
+
+            raw = response.choices[0].message.content or "{}"
+            data = json.loads(raw)
+
+            # Normalise section_feedback keys to lowercase for merging
+            raw_section_feedback: Dict[str, Dict] = data.get("section_feedback") or {}
+            normalised_section_feedback: Dict[str, Dict] = {
+                k.lower(): v for k, v in raw_section_feedback.items()
+            }
+
+            result = LLMReviewResult(
+                summary=str(data.get("summary") or ""),
+                strengths=list(data.get("strengths") or []),
+                weaknesses=list(data.get("weaknesses") or []),
+                top_suggestions=list(data.get("top_suggestions") or []),
+                section_feedback=normalised_section_feedback,
+            )
+
+            await self._cache_set(cache_key, result)
+
+            return result
+
+        except Exception as exc:
+            logger.warning("LLM resume analysis failed, using rule-based fallback: %s", exc)
+            return None
+
+    async def analyze_resume(
         self,
         resume_text: str,
         resume_document: Document,
@@ -120,7 +401,7 @@ class ResumeReviewService:
                 keyword_analysis = self._analyze_keywords(resume_text, target_job)
                 relevance_score = keyword_analysis.keyword_density_score
 
-            # Calculate overall score
+            # Calculate overall score (always rule-based)
             overall_score = self._calculate_overall_score(
                 structure_score,
                 content_score,
@@ -128,7 +409,7 @@ class ResumeReviewService:
                 relevance_score
             )
 
-            # Generate insights
+            # Generate rule-based insights (used as fallback)
             strengths = self._identify_strengths(
                 resume_text, has_contact, has_quantified, structure_score, content_score
             )
@@ -140,10 +421,54 @@ class ResumeReviewService:
                 weaknesses, has_quantified, sections, target_job, keyword_analysis
             )
 
-            # Generate executive summary
+            # Generate rule-based executive summary (fallback)
             summary = self._generate_summary(
                 overall_score, strengths, weaknesses, target_job
             )
+
+            # LLM enhancement — narrative fields are replaced when available
+            rule_scores = {
+                "structure": structure_score,
+                "content": content_score,
+                "formatting": formatting_score,
+            }
+
+            # Optimisation: skip LLM entirely for very low-quality resumes
+            # (rule-based analysis is already the right output for them)
+            llm_result = None
+            if overall_score >= 40:
+                language = _detect_language(resume_text)
+                llm_result = await self._llm_analyze(
+                    resume_text=resume_text,
+                    rule_scores=rule_scores,
+                    sections=sections,
+                    language=language,
+                    target_job=target_job,
+                )
+
+            if llm_result:
+                # LLM wins for all narrative fields
+                if llm_result.summary:
+                    summary = llm_result.summary
+                if llm_result.strengths:
+                    strengths = llm_result.strengths
+                if llm_result.weaknesses:
+                    weaknesses = llm_result.weaknesses
+                if llm_result.top_suggestions:
+                    top_suggestions = llm_result.top_suggestions
+
+                # Merge per-section feedback (normalise section names to lowercase for lookup)
+                if llm_result.section_feedback:
+                    for section in sections:
+                        key = section.section_name.lower()
+                        fb = llm_result.section_feedback.get(key)
+                        if fb:
+                            if fb.get("strengths"):
+                                section.strengths = list(fb["strengths"])
+                            if fb.get("weaknesses"):
+                                section.weaknesses = list(fb["weaknesses"])
+                            if fb.get("suggestions"):
+                                section.suggestions = list(fb["suggestions"])
 
             return ResumeReviewResponse(
                 document_id=resume_document.id,

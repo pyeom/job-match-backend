@@ -359,7 +359,7 @@ async def review_resume(
 
     # Analyze the resume
     try:
-        review = resume_review_service.analyze_resume(
+        review = await resume_review_service.analyze_resume(
             resume_text=resume_text,
             resume_document=document,
             target_job=target_job

@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from app.core.csrf import CSRFMiddleware, generate_csrf_token, CSRF_COOKIE_NAME, CSRF_TOKEN_MAX_AGE
 from sqlalchemy import text
-from app.core.config import settings
+from app.core.config import settings, parse_rate_limit
 
 configure_logging(app_env=settings.app_env)
 
@@ -33,6 +33,10 @@ from app.services.embedding_service import embedding_service
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ───────────────────────────────────────────────────────────────
+    import os
+    if settings.app_env == "production" and os.getenv("SKIP_EMAIL_VERIFICATION", "").lower() in ("1", "true", "yes"):
+        raise RuntimeError("SKIP_EMAIL_VERIFICATION must not be set in production — remove it from your environment.")
+
     logger.info("Starting up Job Match backend...")
 
     # 1. Verify database connectivity
@@ -137,10 +141,17 @@ app.add_middleware(
 # Add CORS middleware with explicit method and header allowlist.
 # allow_origin_regex covers ngrok tunnels used during local development —
 # their subdomains rotate so they cannot be hardcoded in allowed_origins.
+# The ngrok regex is only active in development/dev environments to prevent
+# arbitrary ngrok tunnels from calling a production API with full CORS clearance.
+_ngrok_origin_regex = (
+    r"https://.*\.ngrok-free\.app"
+    if settings.app_env in ("development", "dev")
+    else None
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
-    allow_origin_regex=r"https://.*\.ngrok-free\.app",
+    allow_origin_regex=_ngrok_origin_regex,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=[
@@ -167,7 +178,7 @@ async def request_timeout_middleware(request: Request, call_next):
             request.method,
             request.url.path,
         )
-        return JSONResponse({"error": "Request timeout"}, status_code=504)
+        return JSONResponse({"detail": "Request timed out. Please try again."}, status_code=504)
 
 
 @app.middleware("http")
@@ -186,9 +197,18 @@ async def add_security_headers(request: Request, call_next):
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    """Assign a unique request ID to every request for end-to-end tracing."""
+    """Assign a unique request ID to every request for end-to-end tracing.
+
+    The ID is propagated via:
+    - structlog context vars (all log lines in this request carry request_id)
+    - app.core.request_context.get_request_id() (for outbound HTTP calls to MALA etc.)
+    - X-Request-ID response header (so clients can include it in bug reports)
+    """
+    from app.core.request_context import set_request_id
+
     request_id = request.headers.get("X-Request-ID", str(uuid4()))
     request.state.request_id = request_id
+    set_request_id(request_id)
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(request_id=request_id)
     response = await call_next(request)
@@ -226,10 +246,11 @@ async def general_rate_limit_middleware(request: Request, call_next):
         rate_key = f"general:ip:{request.client.host if request.client else 'unknown'}"
 
     from app.services.rate_limit_service import rate_limit_service
+    _rl_global_max, _rl_global_window = parse_rate_limit(settings.rate_limit_global)
     is_allowed, retry_after = await rate_limit_service.check_rate_limit(
         key=rate_key,
-        max_requests=300,
-        window_seconds=60,
+        max_requests=_rl_global_max,
+        window_seconds=_rl_global_window,
     )
     if not is_allowed:
         return JSONResponse(
@@ -239,6 +260,25 @@ async def general_rate_limit_middleware(request: Request, call_next):
         )
 
     return await call_next(request)
+
+
+# Global exception handlers — normalise all errors to {"detail": "..."}
+from fastapi.exceptions import RequestValidationError
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.debug("Validation error on %s %s: %s", request.method, request.url.path, exc.errors())
+    return JSONResponse({"detail": exc.errors()}, status_code=422)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        {"detail": "An unexpected error occurred. Please try again later."},
+        status_code=500,
+    )
 
 
 # Include API routers
